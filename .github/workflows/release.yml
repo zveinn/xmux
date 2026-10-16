@@ -1,0 +1,138 @@
+name: release
+
+# Tags only. A tag push carries no branch context, so the `guard` job below is
+# what actually enforces "tags on the default branch" — see the comment there.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # A tag push event has no branch, and `on.push.tags` cannot be filtered by
+  # branch (GitHub ignores `branches` when `tags` is present). So we resolve the
+  # tag to a commit and assert it is an ancestor of the default branch; a tag
+  # cut from a feature branch or a detached commit fails here before anything
+  # is built.
+  guard:
+    name: tag is on the default branch
+    runs-on: ubuntu-latest
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tagged commit is reachable from the default branch
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          # ^{commit} dereferences annotated tags to the underlying commit;
+          # fall back to the event SHA if the tag ref was not fetched locally.
+          commit=$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}" 2>/dev/null \
+            || git rev-parse "${GITHUB_SHA}^{commit}")
+          if git merge-base --is-ancestor "$commit" "refs/remotes/origin/${DEFAULT_BRANCH}"; then
+            echo "$GITHUB_REF_NAME -> $commit is on ${DEFAULT_BRANCH}"
+          else
+            echo "::error::Tag $GITHUB_REF_NAME ($commit) is not an ancestor of ${DEFAULT_BRANCH}; refusing to release."
+            exit 1
+          fi
+
+  build:
+    name: build (${{ matrix.arch.name }})
+    needs: guard
+    runs-on: ${{ matrix.arch.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Native runners on both architectures: libghostty-vt-sys compiles
+        # Ghostty with zig for the host, so cross-compiling is more trouble
+        # than a second runner.
+        arch:
+          - { name: amd64, runner: ubuntu-latest }
+          - { name: arm64, runner: ubuntu-24.04-arm }
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch.name }}
+
+      # libghostty-vt-sys builds libghostty-vt from Ghostty source at build
+      # time, and Ghostty requires this EXACT zig version (newer ones are
+      # rejected). Only bump together with the libghostty-vt crate: check
+      # what its pinned Ghostty source demands first.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: |
+          cargo build --release --locked
+          strip target/release/xmux
+
+      - name: Package
+        env:
+          ARCH: ${{ matrix.arch.name }}
+        run: |
+          set -euo pipefail
+          stage="xmux-${GITHUB_REF_NAME}-linux-${ARCH}"
+          mkdir -p "dist/${stage}" artifacts
+          cp target/release/xmux README.md xmux.service default-config.yaml "dist/${stage}/"
+          if [ -f LICENSE ]; then
+            cp LICENSE "dist/${stage}/"
+          fi
+          tar -C dist -czf "artifacts/${stage}.tar.gz" "$stage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xmux-${{ matrix.arch.name }}
+          path: artifacts/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: artifacts
+        run: |
+          set -euo pipefail
+          sha256sum *.tar.gz | tee SHA256SUMS
+          ls -la
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          # A tag like v1.2.0-rc1 ships as a prerelease and does not move
+          # the "latest release" pointer.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS

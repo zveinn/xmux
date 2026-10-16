@@ -118,6 +118,27 @@ pub enum BarHit {
     Tab(usize),
 }
 
+/// Where a bar is drawn. `hidden` takes no rows; the panes get them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarPosition {
+    /// Along the bottom of the screen.
+    Bottom,
+    /// Along the top of the screen.
+    Top,
+    /// Not drawn.
+    Hidden,
+}
+
+impl BarPosition {
+    fn is_top(self) -> bool {
+        matches!(self, Self::Top)
+    }
+
+    fn is_shown(self) -> bool {
+        !matches!(self, Self::Hidden)
+    }
+}
+
 /// Where the status bar, the agent bar, and the pane area sit on one
 /// client's screen.
 ///
@@ -125,7 +146,7 @@ pub enum BarHit {
 /// own top-left; `content_y` is where that lands on the screen). Each
 /// bar is a contiguous run of screen rows. When both bars share an edge
 /// the agent bar sits on the pane side: above the status bar at the
-/// bottom, below it at the top.
+/// bottom, below it at the top. A hidden bar has no row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Chrome {
     pub content: (u16, u16),
@@ -143,20 +164,31 @@ pub struct Chrome {
 /// The status bar takes `bar_rows` once the terminal is at least two
 /// rows tall, and always leaves one row for the panes. The agent bar
 /// gets `agent_rows` of whatever the status bar left, still keeping
-/// one pane row. A bar on top shifts the pane area down. The row
+/// one pane row. A bar on top shifts the pane area down. A hidden bar
+/// takes nothing, whatever row count the layout asked for. The row
 /// counts are the wrapped heights the layouts want; this only places
 /// the blocks and caps them.
 pub fn chrome(
     size: (u16, u16),
-    bar_top: bool,
+    bar_position: BarPosition,
     bar_rows: u16,
-    agent_top: bool,
+    agent_position: BarPosition,
     agent_rows: u16,
 ) -> Chrome {
     let (cols, rows) = size;
     let budget = rows.saturating_sub(1);
-    let n = bar_rows.min(budget);
-    let a = agent_rows.min(budget - n);
+    let n = if bar_position.is_shown() {
+        bar_rows.min(budget)
+    } else {
+        0
+    };
+    let a = if agent_position.is_shown() {
+        agent_rows.min(budget - n)
+    } else {
+        0
+    };
+    let bar_top = bar_position.is_top();
+    let agent_top = agent_position.is_top();
     let top_rows = if bar_top { n } else { 0 } + if agent_top { a } else { 0 };
     let bottom_rows = n + a - top_rows;
     let bar_row = (n > 0).then(|| if bar_top { 0 } else { rows - n });
@@ -181,24 +213,31 @@ pub fn chrome(
 /// must be used for split and navigation geometry too. Which edge the
 /// bar sits on changes the pane origin, not this size.
 pub fn content_size(size: (u16, u16), bar_rows: u16) -> (u16, u16) {
-    chrome(size, false, bar_rows, false, 0).content
+    chrome(size, BarPosition::Bottom, bar_rows, BarPosition::Bottom, 0).content
 }
 
 /// Both bars laid out for one client, and the screen geometry they
 /// leave. Drawing, pane sizing, and click hit-testing all go through
 /// this so they agree on where everything is. The status bar is laid
-/// out first; the agent bar wraps into the rows it leaves.
+/// out first; the agent bar wraps into the rows it leaves. A hidden
+/// bar is zero rows, so it neither draws nor shrinks the other bar.
 pub fn screen_layout(
     items: &[BarSession],
     agent_items: &[BarSession],
     active: &Session,
     size: (u16, u16),
-    bar_top: bool,
-    agent_top: bool,
+    bar_position: BarPosition,
+    agent_position: BarPosition,
 ) -> (Chrome, BarLayout, BarLayout) {
-    let bar = bar_layout(items, active, size.0, size.1);
-    let agent = agent_bar_layout(agent_items, size.0, size.1.saturating_sub(bar.rows));
-    let screen = chrome(size, bar_top, bar.rows, agent_top, agent.rows);
+    let bar_budget = if bar_position.is_shown() { size.1 } else { 0 };
+    let bar = bar_layout(items, active, size.0, bar_budget);
+    let agent_budget = if agent_position.is_shown() {
+        size.1.saturating_sub(bar.rows)
+    } else {
+        0
+    };
+    let agent = agent_bar_layout(agent_items, size.0, agent_budget);
+    let screen = chrome(size, bar_position, bar.rows, agent_position, agent.rows);
     (screen, bar, agent)
 }
 
@@ -235,8 +274,8 @@ pub fn draw_session(
     agent_bar_background: Option<Color>,
     bar_foreground: Option<Color>,
     agent_bar_foreground: Option<Color>,
-    bar_top: bool,
-    agent_top: bool,
+    bar_position: BarPosition,
+    agent_position: BarPosition,
     synchronized: bool,
     full: bool,
 ) -> Result<()> {
@@ -245,8 +284,8 @@ pub fn draw_session(
         agent_sessions,
         session,
         size,
-        bar_top,
-        agent_top,
+        bar_position,
+        agent_position,
     );
     let area = Rect {
         x: 0,
@@ -1629,13 +1668,13 @@ mod tests {
 
     #[test]
     fn chrome_puts_the_bar_on_the_configured_edge() {
-        let bottom = chrome((80, 24), false, 1, false, 0);
+        let bottom = chrome((80, 24), BarPosition::Bottom, 1, BarPosition::Bottom, 0);
         assert_eq!(bottom.bar_row, Some(23));
         assert_eq!(bottom.bar_rows, 1);
         assert_eq!(bottom.content, (80, 23));
         assert_eq!(bottom.content_y, 0);
 
-        let top = chrome((80, 24), true, 1, false, 0);
+        let top = chrome((80, 24), BarPosition::Top, 1, BarPosition::Bottom, 0);
         assert_eq!(top.bar_row, Some(0));
         assert_eq!(top.bar_rows, 1);
         assert_eq!(top.content_y, 1);
@@ -1644,12 +1683,12 @@ mod tests {
         // Wrapped bar: tabs occupy the upper row of the block, sessions
         // the lower one. On the bottom edge that puts sessions on the
         // last screen row; on the top edge, tabs are row 0.
-        let stacked_bottom = chrome((80, 24), false, 2, false, 0);
+        let stacked_bottom = chrome((80, 24), BarPosition::Bottom, 2, BarPosition::Bottom, 0);
         assert_eq!(stacked_bottom.bar_row, Some(22));
         assert_eq!(stacked_bottom.content, (80, 22));
         assert_eq!(stacked_bottom.content_y, 0);
 
-        let stacked_top = chrome((80, 24), true, 2, false, 0);
+        let stacked_top = chrome((80, 24), BarPosition::Top, 2, BarPosition::Bottom, 0);
         assert_eq!(stacked_top.bar_row, Some(0));
         assert_eq!(stacked_top.bar_rows, 2);
         assert_eq!(stacked_top.content_y, 2);
@@ -1659,7 +1698,7 @@ mod tests {
     #[test]
     fn the_agent_bar_sits_on_the_pane_side_of_a_shared_edge() {
         // Both at the bottom: agent bar directly above the status bar.
-        let bottom = chrome((80, 24), false, 1, false, 2);
+        let bottom = chrome((80, 24), BarPosition::Bottom, 1, BarPosition::Bottom, 2);
         assert_eq!(bottom.bar_row, Some(23));
         assert_eq!(bottom.agent_row, Some(21));
         assert_eq!(bottom.agent_rows, 2);
@@ -1667,7 +1706,7 @@ mod tests {
         assert_eq!(bottom.content_y, 0);
 
         // Both at the top: agent bar directly below the status bar.
-        let top = chrome((80, 24), true, 2, true, 1);
+        let top = chrome((80, 24), BarPosition::Top, 2, BarPosition::Top, 1);
         assert_eq!(top.bar_row, Some(0));
         assert_eq!(top.agent_row, Some(2));
         assert_eq!(top.content, (80, 21));
@@ -1676,13 +1715,13 @@ mod tests {
 
     #[test]
     fn the_agent_bar_can_take_the_other_edge() {
-        let agent_top = chrome((80, 24), false, 1, true, 1);
+        let agent_top = chrome((80, 24), BarPosition::Bottom, 1, BarPosition::Top, 1);
         assert_eq!(agent_top.agent_row, Some(0));
         assert_eq!(agent_top.bar_row, Some(23));
         assert_eq!(agent_top.content, (80, 22));
         assert_eq!(agent_top.content_y, 1);
 
-        let agent_bottom = chrome((80, 24), true, 1, false, 1);
+        let agent_bottom = chrome((80, 24), BarPosition::Top, 1, BarPosition::Bottom, 1);
         assert_eq!(agent_bottom.bar_row, Some(0));
         assert_eq!(agent_bottom.agent_row, Some(23));
         assert_eq!(agent_bottom.content, (80, 22));
@@ -1691,19 +1730,88 @@ mod tests {
 
     #[test]
     fn no_agents_means_no_agent_bar_and_panes_keep_a_row() {
-        let none = chrome((80, 24), false, 1, false, 0);
+        let none = chrome((80, 24), BarPosition::Bottom, 1, BarPosition::Bottom, 0);
         assert_eq!(none.agent_row, None);
         assert_eq!(none.content, (80, 23));
 
         // Three rows: status bar 1, agent bar 1, panes 1 — the agent
         // bar never eats the last pane row.
-        let tight = chrome((80, 3), false, 1, false, 5);
+        let tight = chrome((80, 3), BarPosition::Bottom, 1, BarPosition::Bottom, 5);
         assert_eq!(tight.agent_rows, 1);
         assert_eq!(tight.agent_row, Some(1));
         assert_eq!(tight.content, (80, 1));
-        let full = chrome((80, 2), false, 1, true, 1);
+        let full = chrome((80, 2), BarPosition::Bottom, 1, BarPosition::Top, 1);
         assert_eq!(full.agent_row, None);
         assert_eq!(full.content, (80, 1));
+    }
+
+    #[test]
+    fn a_hidden_bar_takes_no_rows() {
+        // The status bar's requested rows are ignored, and the agent
+        // bar sits on the bottom edge with no gap above it.
+        let no_status = chrome((80, 24), BarPosition::Hidden, 3, BarPosition::Bottom, 2);
+        assert_eq!(no_status.bar_row, None);
+        assert_eq!(no_status.bar_rows, 0);
+        assert_eq!(no_status.agent_row, Some(22));
+        assert_eq!(no_status.agent_rows, 2);
+        assert_eq!(no_status.content, (80, 22));
+        assert_eq!(no_status.content_y, 0);
+
+        let no_agent = chrome((80, 24), BarPosition::Top, 1, BarPosition::Hidden, 4);
+        assert_eq!(no_agent.agent_row, None);
+        assert_eq!(no_agent.agent_rows, 0);
+        assert_eq!(no_agent.bar_row, Some(0));
+        assert_eq!(no_agent.content, (80, 23));
+        assert_eq!(no_agent.content_y, 1);
+
+        let neither = chrome((80, 24), BarPosition::Hidden, 1, BarPosition::Hidden, 1);
+        assert_eq!(neither.bar_row, None);
+        assert_eq!(neither.agent_row, None);
+        assert_eq!(neither.content, (80, 24));
+        assert_eq!(neither.content_y, 0);
+
+        // Hidden status bar, agent bar at the top: row 0, no gap.
+        let agent_top = chrome((80, 24), BarPosition::Hidden, 1, BarPosition::Top, 1);
+        assert_eq!(agent_top.agent_row, Some(0));
+        assert_eq!(agent_top.bar_row, None);
+        assert_eq!(agent_top.content_y, 1);
+        assert_eq!(agent_top.content, (80, 23));
+    }
+
+    #[test]
+    fn a_hidden_status_bar_does_not_shrink_the_agent_bar() {
+        let session = view("meow", &["shell"]);
+        let agents = vec![
+            running(1, "claude-1", None, false),
+            running(2, "grok-2", None, false),
+        ];
+        // 12 columns wraps these two chips (see the wrap test). Three
+        // screen rows: a shown status bar would leave the agent bar one
+        // row, so the second chip would be dropped.
+        let (shown, _, agent_shown) = screen_layout(
+            &[],
+            &agents,
+            &session,
+            (12, 3),
+            BarPosition::Bottom,
+            BarPosition::Bottom,
+        );
+        assert_eq!(agent_shown.rows, 1);
+        assert_eq!(shown.content, (12, 1));
+
+        let (hidden, bar, agent) = screen_layout(
+            &[],
+            &agents,
+            &session,
+            (12, 3),
+            BarPosition::Hidden,
+            BarPosition::Bottom,
+        );
+        assert_eq!(bar.rows, 0);
+        assert_eq!(agent.rows, 2);
+        assert_eq!(hidden.bar_row, None);
+        assert_eq!(hidden.agent_rows, 2);
+        assert_eq!(hidden.content, (12, 1));
     }
 
     #[test]

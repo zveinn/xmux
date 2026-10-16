@@ -163,8 +163,8 @@ fn config_mtime() -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// Pinned sessions first (slot order), unpinned after in their existing
-/// order — applied after a reload changes the pins.
+/// Pinned sessions first (the order listed in the config), unpinned
+/// after in their existing order — applied after a reload changes the pins.
 fn resort_sessions(sessions: &mut [Session], config: &Config) {
     sessions.sort_by_key(|s| {
         config
@@ -609,8 +609,8 @@ pub fn run() -> Result<()> {
                         config.agent_bar_background,
                         config.bar_foreground,
                         config.agent_bar_foreground,
-                        config.bar_top,
-                        config.agent_bar_top,
+                        config.bar_position,
+                        config.agent_bar_position,
                         // A full frame wipes the screen before painting,
                         // so it has to be atomic even when a pointer-only
                         // repaint would otherwise skip the sync.
@@ -820,8 +820,9 @@ pub fn run() -> Result<()> {
 /// The status bar's height depends on this client's width and on the
 /// session's tabs, so two clients can have different pane heights.
 /// The agent bar adds its own rows when agent sessions exist.
-/// A missing session (one being created) reserves a single bar row;
-/// the following attach resizes to the real wrap.
+/// A missing session (one being created) reserves a single status-bar
+/// row when that bar is shown; the following attach resizes to the
+/// real wrap. A hidden bar reserves nothing.
 fn pane_size(screen: (u16, u16), sessions: &[Session], si: usize, config: &Config) -> (u16, u16) {
     client_chrome(screen, sessions, si, config).content
 }
@@ -833,7 +834,7 @@ fn client_chrome(
     config: &Config,
 ) -> crate::render::Chrome {
     let Some(session) = sessions.get(si) else {
-        return chrome(screen, config.bar_top, 1, config.agent_bar_top, 0);
+        return chrome(screen, config.bar_position, 1, config.agent_bar_position, 0);
     };
     let items = bar_sessions(&config.pins, sessions);
     let agent_items = agent_bar_sessions(sessions);
@@ -842,8 +843,8 @@ fn client_chrome(
         &agent_items,
         session,
         screen,
-        config.bar_top,
-        config.agent_bar_top,
+        config.bar_position,
+        config.agent_bar_position,
     )
     .0
 }

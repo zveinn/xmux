@@ -39,15 +39,17 @@ scrollback_lines: 5000
 # over SSH when your terminal supports it)
 select_copy: true
 
-# status bar position: bottom (default) or top.
+# status bar position: bottom (default), top, or hidden.
+# hidden draws no status bar; the panes take those rows.
 # sessions sit on the left, tabs of the active session on the right.
 # when the two would overlap, the tabs move up a line.
 bar_position: bottom
 
-# agent bar position: bottom or top; unset = same edge as bar_position.
+# agent bar position: bottom, top, or hidden; unset = same as
+# bar_position, including hidden.
 # sessions created with `xmux agent` sit on this bar, not the status bar.
 # on the same edge it stacks on the pane side: above the status bar at
-# the bottom, below it at the top. hidden while there are no agents.
+# the bottom, below it at the top. also omitted while there are no agents.
 agent_bar_position: bottom
 
 # bar backgrounds. unset or blank = the terminal's own background.
@@ -86,5 +88,7 @@ keybindings:
   fullscreen: ctrl+f
   terminal-settings: ctrl+s
 
+# pinned sessions, in this order. key opens the session from anywhere,
+# starting it if it isn't running.
 sessions:
-  1: { name: meow, key: F7 }
+  - { name: meow, key: F7 }

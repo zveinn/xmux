@@ -10,16 +10,17 @@
 //!   next-finished: ctrl+a
 //!   split-vertical: alt+v
 //! sessions:
-//!   1: { name: meow, key: F1 }
-//!   5: { name: scratch, key: F5 }
+//!   - { name: meow, key: F1 }
+//!   - { name: scratch, key: F5 }
 //! ```
 //!
 //! `start_dir` is where new shells start (unset = your home directory);
 //! `commands` type a program into the shell; `keybindings` rebind the
 //! server's own controls (any action not listed keeps its default);
-//! `sessions` pin sessions to slots in the session list — the slot
-//! number orders them (gaps collapse in the display) and the key opens
-//! the session from anywhere, starting it if it isn't running.
+//! `sessions` pin sessions in the order they are listed, and the key
+//! opens the session from anywhere, starting it if it isn't running.
+//! A map keyed by slot number still loads: the numbers sort the list
+//! and gaps collapse.
 //! Keys are `[ctrl+][alt+]<char>` or `F1`-`F12`; ctrl+letter becomes the
 //! matching C0 control byte (0x01-0x1a), an alt prefix a leading ESC,
 //! and F-keys their escape sequences.
@@ -27,9 +28,11 @@
 use std::collections::HashMap;
 
 use crossterm::style::Color;
+use serde::Deserialize;
 
 use crate::input::{InputAction, Overlay};
 use crate::model::NavDir;
+use crate::render::BarPosition;
 
 /// What a bound key does.
 pub enum BindingAction {
@@ -45,9 +48,8 @@ pub struct Binding {
     pub action: BindingAction,
 }
 
-/// A session pinned to a slot in the session list. Pins are kept in
-/// slot order; the slot numbers themselves only order the list (gaps
-/// collapse in the display).
+/// A session pinned in the session list. Pins stay in the order they
+/// are listed in the config.
 pub struct Pin {
     pub name: String,
 }
@@ -56,7 +58,7 @@ pub struct Config {
     /// All key bindings (controls, command bindings, session keys), longest
     /// sequence first.
     pub bindings: Vec<Binding>,
-    /// Pinned sessions in slot order.
+    /// Pinned sessions in the order they are listed in the config.
     pub pins: Vec<Pin>,
     /// Focused-pane dividers, manager selectors, and the attached mark
     /// in `xmux list` (`accent: "#7aa2f7"`). Defaults to the terminal
@@ -118,15 +120,16 @@ pub struct Config {
     /// Mouse select-to-copy (`select_copy: true`): drag selects text in
     /// a pane, releasing copies it to the client's clipboard via OSC 52.
     pub select_copy: bool,
-    /// Status bar at the top of the screen (`bar_position: top`) instead
-    /// of the default bottom. Sessions always sit on the left and tabs
-    /// on the right; there is no alignment setting.
-    pub bar_top: bool,
-    /// Agent bar (sessions created with `xmux agent`) at the top
-    /// (`agent_bar_position: top`) or bottom. Defaults to the status
-    /// bar's edge. Sharing an edge, the agent bar sits on the pane side
-    /// of the status bar.
-    pub agent_bar_top: bool,
+    /// Where the status bar sits (`bar_position: top`). `bottom` is the
+    /// default. `hidden` draws no status bar and gives its rows to the
+    /// panes. Sessions always sit on the left and tabs on the right;
+    /// there is no alignment setting.
+    pub bar_position: BarPosition,
+    /// Where the agent bar sits (`agent_bar_position: top`). `hidden`
+    /// draws no agent bar. Absent follows
+    /// [`bar_position`](Self::bar_position), including `hidden`. Sharing
+    /// an edge, the agent bar sits on the pane side of the status bar.
+    pub agent_bar_position: BarPosition,
     /// Background of the status bar, the one that lists sessions and
     /// tabs (`bar_background: "#1a1b26"`). Absent leaves the terminal's
     /// own background. Open and just-finished chips still paint their
@@ -209,6 +212,13 @@ struct RawPin {
     key: String,
 }
 
+/// One pinned session, already in display order, with the label used
+/// when its name or key is rejected.
+struct ListedPin {
+    label: String,
+    pin: RawPin,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -216,8 +226,10 @@ struct RawConfig {
     commands: HashMap<String, String>,
     #[serde(default)]
     keybindings: HashMap<String, String>,
-    #[serde(default)]
-    sessions: HashMap<u32, RawPin>,
+    /// A list, in file order. A map keyed by slot number still loads
+    /// and is sorted by those numbers.
+    #[serde(default, deserialize_with = "deserialize_sessions")]
+    sessions: Vec<ListedPin>,
     #[serde(default)]
     accent: Option<String>,
     /// Open session and tab chip fill. Absent or blank uses `accent`.
@@ -282,7 +294,8 @@ struct RawConfig {
     /// loads.
     #[serde(default)]
     bar_alignment: Option<String>,
-    /// Edge of the agent bar; absent follows `bar_position`.
+    /// Edge of the agent bar (`top`, `bottom`, or `hidden`); absent
+    /// follows `bar_position`.
     #[serde(default)]
     agent_bar_position: Option<String>,
     /// Obsolete. Agent chips are always left-aligned. Accepted so older
@@ -303,6 +316,56 @@ struct RawConfig {
     agent_bar_foreground: Option<String>,
 }
 
+/// `sessions` is a list in file order. Older configs use a map keyed by
+/// slot number; those numbers sort the list and gaps collapse.
+fn deserialize_sessions<'de, D>(deserializer: D) -> Result<Vec<ListedPin>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_yaml::Value::deserialize(deserializer)?;
+    match value {
+        serde_yaml::Value::Null => Ok(Vec::new()),
+        serde_yaml::Value::Sequence(items) => {
+            let mut pins = Vec::with_capacity(items.len());
+            for (i, item) in items.into_iter().enumerate() {
+                pins.push(listed_pin(format!("session {}", i + 1), item)?);
+            }
+            Ok(pins)
+        }
+        serde_yaml::Value::Mapping(map) => {
+            let mut slots = Vec::with_capacity(map.len());
+            for (key, item) in map {
+                let Some(slot) = slot_index(&key) else {
+                    return Err(serde::de::Error::custom(format!(
+                        "invalid session slot key {key:?} (use a list, or a map keyed by slot number)"
+                    )));
+                };
+                slots.push((slot, listed_pin(format!("session slot {slot}"), item)?));
+            }
+            slots.sort_by_key(|(slot, _)| *slot);
+            Ok(slots.into_iter().map(|(_, pin)| pin).collect())
+        }
+        _ => Err(serde::de::Error::custom(
+            "sessions must be a list of { name, key } entries",
+        )),
+    }
+}
+
+fn listed_pin<E: serde::de::Error>(label: String, item: serde_yaml::Value) -> Result<ListedPin, E> {
+    let pin: RawPin =
+        serde_yaml::from_value(item).map_err(|e| E::custom(format!("{label}: {e}")))?;
+    Ok(ListedPin { label, pin })
+}
+
+/// A slot number, as a YAML number or a numeric string (`"1"`).
+fn slot_index(key: &serde_yaml::Value) -> Option<u32> {
+    match key {
+        serde_yaml::Value::Number(n) => n.as_u64().and_then(|n| u32::try_from(n).ok()),
+        serde_yaml::Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
 pub fn load() -> Result<Config, String> {
     let raw = match read_config()? {
         Some((raw, path)) => {
@@ -321,7 +384,7 @@ pub fn load() -> Result<Config, String> {
         None => RawConfig {
             commands: HashMap::new(),
             keybindings: HashMap::new(),
-            sessions: HashMap::new(),
+            sessions: Vec::new(),
             accent: None,
             active_background: None,
             active_foreground: None,
@@ -435,22 +498,22 @@ fn load_raw(raw: RawConfig) -> Result<Config, String> {
         }
     }
 
-    // Pinned sessions, sorted by slot; each gets an OpenSession binding.
-    let mut slots: Vec<(&u32, &RawPin)> = raw.sessions.iter().collect();
-    slots.sort_by_key(|(slot, _)| **slot);
+    // Pinned sessions, in the order they were listed. Each gets an
+    // OpenSession binding. A numbered map was already sorted by slot.
     let mut pins = Vec::new();
-    for (slot, pin) in slots {
+    for listed in raw.sessions {
+        let ListedPin { label, pin } = listed;
         if pin.name.trim().is_empty() {
-            return Err(format!("session slot {slot}: name must not be empty"));
+            return Err(format!("{label}: name must not be empty"));
         }
         if pins.iter().any(|p: &Pin| p.name == pin.name.trim()) {
             return Err(format!(
-                "session \"{}\" is pinned to more than one slot",
+                "session \"{}\" is pinned more than once",
                 pin.name.trim()
             ));
         }
         let seqs = parse_key_multi(&pin.key)
-            .map_err(|e| format!("invalid key \"{}\" for session slot {slot}: {e}", pin.key))?;
+            .map_err(|e| format!("invalid key \"{}\" for {label}: {e}", pin.key))?;
         for seq in seqs {
             bindings.push(Binding {
                 seq,
@@ -522,11 +585,15 @@ fn load_raw(raw: RawConfig) -> Result<Config, String> {
     };
 
     // Absent means the bottom edge.
-    let bar_top = parse_edge(raw.bar_position.as_deref(), false, "bar_position")?;
-    // Absent means the same edge as the status bar.
-    let agent_bar_top = parse_edge(
+    let bar_position = parse_edge(
+        raw.bar_position.as_deref(),
+        BarPosition::Bottom,
+        "bar_position",
+    )?;
+    // Absent means the same place as the status bar, including hidden.
+    let agent_bar_position = parse_edge(
         raw.agent_bar_position.as_deref(),
-        bar_top,
+        bar_position,
         "agent_bar_position",
     )?;
     // Obsolete keys. Mentioning them keeps `deny_unknown_fields` from
@@ -557,8 +624,8 @@ fn load_raw(raw: RawConfig) -> Result<Config, String> {
         start_dir,
         scrollback_lines,
         select_copy: raw.select_copy.unwrap_or(true),
-        bar_top,
-        agent_bar_top,
+        bar_position,
+        agent_bar_position,
         bar_background,
         agent_bar_background,
         bar_foreground,
@@ -566,14 +633,19 @@ fn load_raw(raw: RawConfig) -> Result<Config, String> {
     })
 }
 
-/// `top` or `bottom`. An absent or blank value uses `default_top`.
-fn parse_edge(value: Option<&str>, default_top: bool, field: &str) -> Result<bool, String> {
+/// `top`, `bottom`, or `hidden`. An absent or blank value uses `default`.
+fn parse_edge(
+    value: Option<&str>,
+    default: BarPosition,
+    field: &str,
+) -> Result<BarPosition, String> {
     match value.map(str::trim) {
-        None | Some("") => Ok(default_top),
-        Some("bottom") => Ok(false),
-        Some("top") => Ok(true),
+        None | Some("") => Ok(default),
+        Some("bottom") => Ok(BarPosition::Bottom),
+        Some("top") => Ok(BarPosition::Top),
+        Some("hidden") => Ok(BarPosition::Hidden),
         Some(other) => Err(format!(
-            "invalid {field} \"{other}\" (expected top or bottom)"
+            "invalid {field} \"{other}\" (expected top, bottom, or hidden)"
         )),
     }
 }
@@ -790,17 +862,52 @@ mod tests {
 
     #[test]
     fn bar_edges_default_to_the_bottom() {
-        assert_eq!(parse_edge(None, false, "bar_position").unwrap(), false);
-        assert_eq!(parse_edge(Some(""), false, "bar_position").unwrap(), false);
         assert_eq!(
-            parse_edge(Some("bottom"), false, "agent_bar_position").unwrap(),
-            false
+            parse_edge(None, BarPosition::Bottom, "bar_position").unwrap(),
+            BarPosition::Bottom
         );
         assert_eq!(
-            parse_edge(Some("top"), false, "bar_position").unwrap(),
-            true
+            parse_edge(Some(""), BarPosition::Bottom, "bar_position").unwrap(),
+            BarPosition::Bottom
         );
-        assert!(parse_edge(Some("left"), false, "agent_bar_position").is_err());
+        assert_eq!(
+            parse_edge(Some("bottom"), BarPosition::Top, "agent_bar_position").unwrap(),
+            BarPosition::Bottom
+        );
+        assert_eq!(
+            parse_edge(Some("top"), BarPosition::Bottom, "bar_position").unwrap(),
+            BarPosition::Top
+        );
+        assert_eq!(
+            parse_edge(Some("hidden"), BarPosition::Bottom, "bar_position").unwrap(),
+            BarPosition::Hidden
+        );
+        // An unset agent bar follows the status bar, including hidden.
+        assert_eq!(
+            parse_edge(None, BarPosition::Hidden, "agent_bar_position").unwrap(),
+            BarPosition::Hidden
+        );
+        let err = parse_edge(Some("left"), BarPosition::Bottom, "agent_bar_position").unwrap_err();
+        assert!(err.contains("hidden"), "{err}");
+    }
+
+    #[test]
+    fn hidden_bars_load_and_an_unset_agent_bar_follows() {
+        let both = load_raw(serde_yaml::from_str("bar_position: hidden\n").unwrap()).unwrap();
+        assert_eq!(both.bar_position, BarPosition::Hidden);
+        assert_eq!(both.agent_bar_position, BarPosition::Hidden);
+        let agent_only = load_raw(
+            serde_yaml::from_str("bar_position: top\nagent_bar_position: hidden\n").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(agent_only.bar_position, BarPosition::Top);
+        assert_eq!(agent_only.agent_bar_position, BarPosition::Hidden);
+        let status_only = load_raw(
+            serde_yaml::from_str("bar_position: hidden\nagent_bar_position: bottom\n").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status_only.bar_position, BarPosition::Hidden);
+        assert_eq!(status_only.agent_bar_position, BarPosition::Bottom);
     }
 
     #[test]
@@ -1090,5 +1197,104 @@ mod tests {
         assert_eq!(old.agent_working.as_deref(), Some("?"));
         assert_eq!(old.agent_finished_symbol.as_deref(), Some("!"));
         assert_eq!(old.agent_finished.as_deref(), Some("#112233"));
+    }
+
+    fn pin_names(yaml: &str) -> Vec<String> {
+        let raw: RawConfig = serde_yaml::from_str(yaml).unwrap();
+        load_raw(raw)
+            .unwrap()
+            .pins
+            .into_iter()
+            .map(|pin| pin.name)
+            .collect()
+    }
+
+    fn open_session_indices(config: &Config) -> Vec<usize> {
+        let mut indices: Vec<usize> = config
+            .bindings
+            .iter()
+            .filter_map(|binding| match binding.action {
+                BindingAction::Control(InputAction::OpenSession(index)) => Some(index),
+                _ => None,
+            })
+            .collect();
+        indices.sort();
+        indices.dedup();
+        indices
+    }
+
+    #[test]
+    fn pinned_sessions_follow_list_order() {
+        let raw: RawConfig = serde_yaml::from_str(
+            "sessions:\n- { name: second, key: alt+2 }\n- name: first\n  key: alt+1\n",
+        )
+        .unwrap();
+        let config = load_raw(raw).unwrap();
+        assert_eq!(
+            config
+                .pins
+                .iter()
+                .map(|pin| pin.name.as_str())
+                .collect::<Vec<_>>(),
+            ["second", "first"]
+        );
+        assert_eq!(open_session_indices(&config), vec![0, 1]);
+        assert!(pin_names("sessions: []").is_empty());
+        assert!(pin_names("sessions: {}").is_empty());
+        assert!(pin_names("sessions:").is_empty());
+        assert!(load_raw(blank_raw()).unwrap().pins.is_empty());
+
+        let empty: RawConfig =
+            serde_yaml::from_str("sessions:\n  - { name: '  ', key: alt+1 }\n").unwrap();
+        let err = load_raw(empty).err().unwrap();
+        assert!(err.contains("session 1"), "{err}");
+        assert!(err.contains("name must not be empty"), "{err}");
+
+        let twice: RawConfig = serde_yaml::from_str(
+            "sessions:\n  - { name: meow, key: alt+1 }\n  - { name: meow, key: alt+2 }\n",
+        )
+        .unwrap();
+        let err = load_raw(twice).err().unwrap();
+        assert!(err.contains("pinned more than once"), "{err}");
+
+        let broken = serde_yaml::from_str::<RawConfig>("sessions:\n  - { name: meow }\n");
+        let err = broken.err().unwrap().to_string();
+        assert!(err.contains("session 1"), "{err}");
+        assert!(err.contains("key"), "{err}");
+        assert!(serde_yaml::from_str::<RawConfig>("sessions: meow\n").is_err());
+    }
+
+    #[test]
+    fn numbered_session_slots_still_sort() {
+        assert_eq!(
+            pin_names("sessions:\n  9: { name: zed, key: F9 }\n  2: { name: bee, key: F2 }\n"),
+            ["bee", "zed"]
+        );
+        assert_eq!(
+            pin_names("sessions:\n  \"3\": { name: cee, key: alt+3 }\n"),
+            ["cee"]
+        );
+        let raw: RawConfig =
+            serde_yaml::from_str("sessions:\n  4: { name: ' ', key: alt+4 }\n").unwrap();
+        let err = load_raw(raw).err().unwrap();
+        assert!(err.contains("session slot 4"), "{err}");
+        assert!(err.contains("name must not be empty"), "{err}");
+        let bad_key: RawConfig =
+            serde_yaml::from_str("sessions:\n  4: { name: dee, key: nope }\n").unwrap();
+        let err = load_raw(bad_key).err().unwrap();
+        assert!(err.contains("session slot 4"), "{err}");
+        assert!(err.contains("nope"), "{err}");
+        assert!(serde_yaml::from_str::<RawConfig>("sessions:\n  meow: { key: alt+1 }\n").is_err());
+    }
+
+    #[test]
+    fn shipped_sessions_are_a_list() {
+        let raw: RawConfig = serde_yaml::from_str(DEFAULT_CONFIG).unwrap();
+        let config = load_raw(raw).unwrap();
+        assert_eq!(config.pins.len(), 1);
+        assert_eq!(config.pins[0].name, "meow");
+        assert_eq!(open_session_indices(&config), vec![0]);
+        assert!(DEFAULT_CONFIG.contains("- { name: meow, key: F7 }"));
+        assert!(!DEFAULT_CONFIG.contains("1: { name:"));
     }
 }

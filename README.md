@@ -122,15 +122,17 @@ scrollback_lines: 5000
 # mouse select-to-copy (clipboard via OSC 52, works over SSH)
 select_copy: true
 
-# status bar position: bottom (default) or top.
+# status bar position: bottom (default), top, or hidden.
+# hidden draws no status bar; the panes take those rows.
 # sessions sit on the left, tabs of the active session on the right.
 # when the two would overlap, the tabs move up a line.
 bar_position: bottom
 
-# agent bar position: bottom or top; unset = same edge as bar_position.
+# agent bar position: bottom, top, or hidden; unset = same as
+# bar_position, including hidden.
 # sessions created with `xmux agent` sit on this bar, not the status bar.
 # on the same edge it stacks on the pane side: above the status bar at
-# the bottom, below it at the top. hidden while there are no agents.
+# the bottom, below it at the top. also omitted while there are no agents.
 agent_bar_position: bottom
 
 # bar backgrounds. unset or blank = the terminal's own background.
@@ -171,10 +173,12 @@ keybindings:
   fullscreen: ctrl+f
   terminal-settings: ctrl+s
 
+# pinned sessions, in this order. key opens the session from anywhere,
+# starting it if it isn't running.
 sessions:
-  1: { name: project1, key: F1 }
-  2: { name: project2, key: F2 }
-  3: { name: random, key: F3 }
+  - { name: project1, key: F1 }
+  - { name: project2, key: F2 }
+  - { name: random, key: F3 }
 ```
 
 Keys are `[ctrl+][alt+]<char>` or `F1`–`F12`; every binding below is
@@ -200,7 +204,7 @@ swallowed by xmux and never reach the inner shell.
 | Text prompts | search, name, and settings fields | Full line editing: `←`/`→` move the caret, `Home`/`End`, `Delete`, `Backspace`, `ctrl+a`/`ctrl+e`/`ctrl+u`/`ctrl+w`; long text scrolls. `esc` cancels, `enter` accepts. In a prompt, `ctrl+a` moves to the start of the line and `ctrl+w` deletes a word |
 | Agent list | `a` inside the session manager | Toggles to agent sessions only, most-recently-active first, with ages (`5s`, `2m`, `1h`, `3d`). Finished names use the same highlight color as the session list. `n` there creates an agent session. `a` again returns to your sessions |
 | Tab manager | `ctrl+n` | Same controls as the session manager. `a` does nothing here |
-| Pinned sessions | `sessions:` in the config | The number is the slot: it orders the list, and gaps collapse. The key (an F-key, or any other chord) opens the session from anywhere, starting it if needed |
+| Pinned sessions | `sessions:` in the config | A list, in the order written. The key (an F-key, or any other chord) opens the session from anywhere, starting it if needed. A map keyed by slot number still loads: those numbers sort the list, and gaps collapse |
 | Commands | `commands:` in the config | The chord types `<program><Enter>` into the focused pane |
 | Shell | `shell:` in the config | Spawned in every pane; unset falls back to `$SHELL`, the passwd entry, then `/bin/sh` |
 | Shell environment | `terminal_envs:` in the config | Set on every spawned shell, on top of the server's own environment. Absent, the only added var is `TERM=xterm-256color`. A section you write is used as given, in place of that default |
@@ -210,8 +214,8 @@ swallowed by xmux and never reach the inner shell.
 | Finished agent chip | `agent_finished_background:` / `agent_finished_foreground:` in the config | After Grok or Claude finishes a turn in a session, that chip is filled with `agent_finished_background` and its text drawn in `agent_finished_foreground` until a client is attached with the panes showing (an open menu does not clear it). Applies on both bars; the session manager names finished sessions in `agent_menu_finished_foreground` instead. `agent_finished_background` defaults to `#a855f7`; `agent_finished_foreground` follows the same unset rules as `active_foreground`. The session on screen keeps the active chip. The old `agent_background`, `agent_color_highlight`, and `agent_finished` keys still load as `agent_finished_background`, and `agent_foreground` as `agent_finished_foreground` |
 | Working agent chip | `agent_working_background:` / `agent_working_foreground:` in the config | While Grok or Claude is working in a session, that chip is filled with `agent_working_background` and its text drawn in `agent_working_foreground`. Either unset or blank falls back to an ordinary chip (the bar background, the bar text). Applies on both bars. The session on screen keeps the active chip. The session manager names working sessions in `agent_menu_working_foreground` instead |
 | Rebindable keys | `keybindings:` in the config | Every control chord above can be remapped (`[ctrl+][alt+]<char>` or `F1`–`F12`); bound chords never reach the inner shell |
-| Status bar | `bar_position:` in the config | Sessions on the left (pins and running sessions; agent sessions have their own bar), tabs of the active session on the right. The open session and the open tab are active chips (`active_background` / `active_foreground`). A session where Grok or Claude is working becomes a working chip (`agent_working_background` / `agent_working_foreground`). A just-finished session becomes a finished chip (`agent_finished_background` / `agent_finished_foreground`) until a client is attached with the panes showing. `bar_position` is `bottom` (default) or `top`. The row itself is `bar_background` (default `#1a1b26`); unset or blank leaves the terminal background. Names use `bar_foreground` (default `#c0caf5`); unset or blank leaves the terminal foreground, dimmed, and open, finished, or working chips without their own foreground use reversed text (working chips without a fill just use the bar text). When the two groups would overlap, the tabs move up a line and wrap, right-aligned, if they still do not fit; sessions stay below, left-aligned, and wrap the same way. A click still hits the chip under the pointer. Applies live on config reload |
-| Agent bar | `agent_bar_position:` in the config | Sessions created with `xmux agent`, left-aligned in creation order, wrapping onto more rows when they do not fit. Chips color the same way as on the status bar (active chip when open, working chip while an agent works, finished chip when it is done). Names use `agent_bar_foreground` (default `#c0caf5`), with the same unset rules as `bar_foreground`. `bottom` or `top`; unset follows `bar_position`. The row itself is `agent_bar_background` (default `#24283b`); unset or blank leaves the terminal background. When both bars share an edge the agent bar sits between the status bar and the panes: above it at the bottom, below it at the top. Hidden while no agent sessions exist. Applies live on config reload |
+| Status bar | `bar_position:` in the config | Sessions on the left (pins and running sessions; agent sessions have their own bar), tabs of the active session on the right. The open session and the open tab are active chips (`active_background` / `active_foreground`). A session where Grok or Claude is working becomes a working chip (`agent_working_background` / `agent_working_foreground`). A just-finished session becomes a finished chip (`agent_finished_background` / `agent_finished_foreground`) until a client is attached with the panes showing. `bar_position` is `bottom` (default), `top`, or `hidden`. `hidden` draws no status bar and gives those rows to the panes. The row itself is `bar_background` (default `#1a1b26`); unset or blank leaves the terminal background. Names use `bar_foreground` (default `#c0caf5`); unset or blank leaves the terminal foreground, dimmed, and open, finished, or working chips without their own foreground use reversed text (working chips without a fill just use the bar text). When the two groups would overlap, the tabs move up a line and wrap, right-aligned, if they still do not fit; sessions stay below, left-aligned, and wrap the same way. A click still hits the chip under the pointer. Applies live on config reload |
+| Agent bar | `agent_bar_position:` in the config | Sessions created with `xmux agent`, left-aligned in creation order, wrapping onto more rows when they do not fit. Chips color the same way as on the status bar (active chip when open, working chip while an agent works, finished chip when it is done). Names use `agent_bar_foreground` (default `#c0caf5`), with the same unset rules as `bar_foreground`. `bottom`, `top`, or `hidden`; unset follows `bar_position`, including `hidden`. `hidden` never draws the bar. The row itself is `agent_bar_background` (default `#24283b`); unset or blank leaves the terminal background. When both bars share an edge the agent bar sits between the status bar and the panes: above it at the bottom, below it at the top. A bar that is not `hidden` is still omitted while no agent sessions exist. Applies live on config reload |
 | Hot reload | edit `config.yaml` | Applies within ~1s of saving: accent, `active_background`, `active_foreground`, `agent_finished_background`, `agent_finished_foreground`, `agent_working_background`, `agent_working_foreground`, `agent_menu_working_foreground`, `agent_menu_finished_foreground`, `bar_background`, `agent_bar_background`, `bar_foreground`, `agent_bar_foreground`, keybindings, commands, pins, `select_copy`, `bar_position`, and `agent_bar_position` live; `shell`, `start_dir`, `terminal_envs`, and `scrollback_lines` to new shells. A broken config is rejected and logged |
 | Detach | `ctrl+g` | The session keeps running; reattach with `xmux a <name>` |
 | State restore | automatic | Sessions, tabs, splits, each shell's directory, and any per-pane auto-run command are saved to `layout.json` next to the config every 10s, and again on SIGTERM, SIGINT, and SIGHUP. Agent sessions are saved too and come back on the agent bar. A server start recreates them as fresh shells in the saved directories (scrollback and running programs are gone). A missing, empty, or invalid `layout.json` falls back to `layout.json.tmp`, then `layout.json.bak`. A layout written before agent sessions were saved still restores its normal sessions |

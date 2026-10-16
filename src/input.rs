@@ -77,7 +77,8 @@ pub enum InputAction {
 }
 
 /// One row of the session-manager list: every pinned session (running or
-/// not, in slot order) followed by running unpinned sessions.
+/// not, in the order listed in the config) followed by running unpinned
+/// sessions.
 pub struct SessionEntry {
     pub name: String,
     /// Index into the sessions vec when the session is running.
@@ -194,8 +195,8 @@ pub fn next_finished_agent(pins: &[Pin], sessions: &[Session], active: usize) ->
 }
 
 /// Create a session, inserting it at its place in the display order:
-/// pinned sessions sit before unpinned ones, in slot order. Returns the
-/// new session's index.
+/// pinned sessions sit before unpinned ones, in the order listed in the
+/// config. Returns the new session's index.
 pub fn create_session(
     sessions: &mut Vec<Session>,
     config: &Config,
@@ -1477,8 +1478,8 @@ pub fn handle_input(
                             &agent_items,
                             &sessions[*active],
                             screen_size,
-                            config.bar_top,
-                            config.agent_bar_top,
+                            config.bar_position,
+                            config.agent_bar_position,
                         );
                         let hit = match (on_bar, on_agent_bar) {
                             (Some(origin), _) => bar.hit(y0 - origin, px),

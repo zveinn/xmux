@@ -120,29 +120,37 @@ pub struct Config {
     /// Mouse select-to-copy (`select_copy: true`): drag selects text in
     /// a pane, releasing copies it to the client's clipboard via OSC 52.
     pub select_copy: bool,
-    /// Where the status bar sits (`bar_position: top`). `bottom` is the
-    /// default. `hidden` draws no status bar and gives its rows to the
-    /// panes. Sessions always sit on the left and tabs on the right;
-    /// there is no alignment setting.
+    /// Where the session bar sits (`bar_position: top`). `bottom` is the
+    /// default. `hidden` draws no session bar and gives its rows to the
+    /// panes. Session chips are left-aligned.
     pub bar_position: BarPosition,
+    /// Where the tab bar sits (`tab_bar_position: top`). `hidden` draws
+    /// no tab bar. Absent follows [`bar_position`](Self::bar_position),
+    /// including `hidden`. Tab chips are left-aligned and use the
+    /// session bar's colors.
+    pub tab_bar_position: BarPosition,
     /// Where the agent bar sits (`agent_bar_position: top`). `hidden`
     /// draws no agent bar. Absent follows
-    /// [`bar_position`](Self::bar_position), including `hidden`. Sharing
-    /// an edge, the agent bar sits on the pane side of the status bar.
+    /// [`bar_position`](Self::bar_position), including `hidden`.
+    ///
+    /// Bars that share an edge stack in a fixed order, from the screen
+    /// edge in toward the panes: tab bar, session bar, agent bar. At
+    /// the top that reads tab, session, agent. At the bottom it reads
+    /// agent, session, tab. A bar on the other edge is skipped.
     pub agent_bar_position: BarPosition,
-    /// Background of the status bar, the one that lists sessions and
-    /// tabs (`bar_background: "#1a1b26"`). Absent leaves the terminal's
-    /// own background. Open and just-finished chips still paint their
-    /// own chip color on top.
+    /// Background of the session bar and the tab bar
+    /// (`bar_background: "#1a1b26"`). Absent leaves the terminal's own
+    /// background. Open and just-finished chips still paint their own
+    /// chip color on top.
     pub bar_background: Option<Color>,
     /// Background of the agent bar
     /// (`agent_bar_background: "#24283b"`). Absent leaves the terminal's
     /// own background.
     pub agent_bar_background: Option<Color>,
-    /// Text on the status bar (`bar_foreground: "#c0caf5"`). Absent
-    /// leaves the terminal's own foreground, dimmed, and open or
-    /// finished chips keep reversed text. When set, this is the text
-    /// color of every chip on that bar.
+    /// Text on the session bar and the tab bar (`bar_foreground:
+    /// "#c0caf5"`). Absent leaves the terminal's own foreground, dimmed,
+    /// and open or finished chips keep reversed text. When set, this is
+    /// the text color of every chip on those bars.
     pub bar_foreground: Option<Color>,
     /// Text on the agent bar (`agent_bar_foreground: "#c0caf5"`). Same
     /// rules as [`bar_foreground`](Self::bar_foreground).
@@ -289,11 +297,15 @@ struct RawConfig {
     select_copy: Option<bool>,
     #[serde(default)]
     bar_position: Option<String>,
-    /// Obsolete. Sessions are always on the left and tabs on the right.
-    /// Accepted so a config written while alignment was a setting still
-    /// loads.
+    /// Obsolete. Session and tab chips are left-aligned on their own
+    /// bars. Accepted so a config written while alignment was a setting
+    /// still loads.
     #[serde(default)]
     bar_alignment: Option<String>,
+    /// Edge of the tab bar (`top`, `bottom`, or `hidden`); absent
+    /// follows `bar_position`.
+    #[serde(default)]
+    tab_bar_position: Option<String>,
     /// Edge of the agent bar (`top`, `bottom`, or `hidden`); absent
     /// follows `bar_position`.
     #[serde(default)]
@@ -408,6 +420,7 @@ pub fn load() -> Result<Config, String> {
             select_copy: None,
             bar_position: None,
             bar_alignment: None,
+            tab_bar_position: None,
             agent_bar_position: None,
             agent_bar_alignment: None,
             bar_background: None,
@@ -590,7 +603,12 @@ fn load_raw(raw: RawConfig) -> Result<Config, String> {
         BarPosition::Bottom,
         "bar_position",
     )?;
-    // Absent means the same place as the status bar, including hidden.
+    // Absent means the same place as the session bar, including hidden.
+    let tab_bar_position = parse_edge(
+        raw.tab_bar_position.as_deref(),
+        bar_position,
+        "tab_bar_position",
+    )?;
     let agent_bar_position = parse_edge(
         raw.agent_bar_position.as_deref(),
         bar_position,
@@ -625,6 +643,7 @@ fn load_raw(raw: RawConfig) -> Result<Config, String> {
         scrollback_lines,
         select_copy: raw.select_copy.unwrap_or(true),
         bar_position,
+        tab_bar_position,
         agent_bar_position,
         bar_background,
         agent_bar_background,
@@ -882,7 +901,7 @@ mod tests {
             parse_edge(Some("hidden"), BarPosition::Bottom, "bar_position").unwrap(),
             BarPosition::Hidden
         );
-        // An unset agent bar follows the status bar, including hidden.
+        // An unset agent bar follows the session bar, including hidden.
         assert_eq!(
             parse_edge(None, BarPosition::Hidden, "agent_bar_position").unwrap(),
             BarPosition::Hidden
@@ -895,19 +914,32 @@ mod tests {
     fn hidden_bars_load_and_an_unset_agent_bar_follows() {
         let both = load_raw(serde_yaml::from_str("bar_position: hidden\n").unwrap()).unwrap();
         assert_eq!(both.bar_position, BarPosition::Hidden);
+        assert_eq!(both.tab_bar_position, BarPosition::Hidden);
         assert_eq!(both.agent_bar_position, BarPosition::Hidden);
         let agent_only = load_raw(
             serde_yaml::from_str("bar_position: top\nagent_bar_position: hidden\n").unwrap(),
         )
         .unwrap();
         assert_eq!(agent_only.bar_position, BarPosition::Top);
+        assert_eq!(agent_only.tab_bar_position, BarPosition::Top);
         assert_eq!(agent_only.agent_bar_position, BarPosition::Hidden);
         let status_only = load_raw(
             serde_yaml::from_str("bar_position: hidden\nagent_bar_position: bottom\n").unwrap(),
         )
         .unwrap();
         assert_eq!(status_only.bar_position, BarPosition::Hidden);
+        assert_eq!(status_only.tab_bar_position, BarPosition::Hidden);
         assert_eq!(status_only.agent_bar_position, BarPosition::Bottom);
+        let split = load_raw(
+            serde_yaml::from_str(
+                "bar_position: bottom\ntab_bar_position: top\nagent_bar_position: hidden\n",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(split.bar_position, BarPosition::Bottom);
+        assert_eq!(split.tab_bar_position, BarPosition::Top);
+        assert_eq!(split.agent_bar_position, BarPosition::Hidden);
     }
 
     #[test]

@@ -106,7 +106,7 @@ pub fn session_entries(pins: &[Pin], sessions: &[Session]) -> Vec<SessionEntry> 
     entries
 }
 
-/// Every normal session on the status bar, in session-list order:
+/// Every normal session on the session bar, in session-list order:
 /// pins (running or not), then other running sessions. Agent sessions
 /// live on their own bar ([`agent_bar_sessions`]). `finished` is set
 /// when that session's agent just went working → idle and nobody is
@@ -163,7 +163,7 @@ fn to_bar_sessions(
 
 /// The next highlighted session after `active`, wrapping around.
 ///
-/// Order is the status bar left to right, then the agent bar left to
+/// Order is the session bar left to right, then the agent bar left to
 /// right. Highlighted means `finished_unseen`: the bar paints that chip
 /// with the finished background after Grok or Claude finishes a turn.
 /// The session already on screen is skipped. `None` when nothing else
@@ -452,7 +452,7 @@ pub(crate) fn compact_mouse_input(buf: &[u8], tail: &mut Vec<u8>) -> Vec<u8> {
 }
 
 /// Pane rectangles of a session's visible tab, in content coordinates
-/// (the status bar is already excluded by `size`).
+/// (the bars are already excluded by `size`).
 fn tab_rects(session: &Session, size: (u16, u16)) -> Vec<(u64, Rect)> {
     let tab = &session.tabs[session.active_tab];
     let full = Rect {
@@ -1457,33 +1457,38 @@ pub fn handle_input(
                     _ => 4, // wheel
                 };
 
-                // The status bar and the agent bar are xmux's own rows.
-                // A tab chip opens that tab, a session chip switches to
-                // it (or starts a stopped pin), and nothing there
-                // belongs to a pane.
+                // The bars are xmux's own rows. A tab chip opens that
+                // tab, a session chip switches to it (or starts a
+                // stopped pin), and nothing there belongs to a pane.
                 let y0 = y.saturating_sub(1);
                 let in_block = |row: Option<u16>, rows: u16| {
                     row.filter(|&origin| y0 >= origin && y0 < origin + rows)
                 };
-                let on_bar = in_block(screen.bar_row, screen.bar_rows);
+                let on_session = in_block(screen.session_row, screen.session_rows);
+                let on_tab = in_block(screen.tab_row, screen.tab_rows);
                 let on_agent_bar = in_block(screen.agent_row, screen.agent_rows);
-                if on_bar.is_some() || on_agent_bar.is_some() {
+                if on_session.is_some() || on_tab.is_some() || on_agent_bar.is_some() {
                     if matches!(kind, 0 | 3) {
                         clear_selection(select, sessions);
                         let items = bar_sessions(&config.pins, sessions);
                         let agent_items = agent_bar_sessions(sessions);
-                        let screen_size = (size.0, size.1 + screen.bar_rows + screen.agent_rows);
-                        let (_, bar, agent_bar) = crate::render::screen_layout(
+                        let screen_size = (
+                            size.0,
+                            size.1 + screen.session_rows + screen.tab_rows + screen.agent_rows,
+                        );
+                        let (_, session_bar, tab_bar, agent_bar) = crate::render::screen_layout(
                             &items,
                             &agent_items,
                             &sessions[*active],
                             screen_size,
                             config.bar_position,
+                            config.tab_bar_position,
                             config.agent_bar_position,
                         );
-                        let hit = match (on_bar, on_agent_bar) {
-                            (Some(origin), _) => bar.hit(y0 - origin, px),
-                            (_, Some(origin)) => agent_bar.hit(y0 - origin, px),
+                        let hit = match (on_session, on_tab, on_agent_bar) {
+                            (Some(origin), _, _) => session_bar.hit(y0 - origin, px),
+                            (_, Some(origin), _) => tab_bar.hit(y0 - origin, px),
+                            (_, _, Some(origin)) => agent_bar.hit(y0 - origin, px),
                             _ => None,
                         };
                         match hit {

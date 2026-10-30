@@ -267,8 +267,8 @@ pub struct Session {
     /// Compared with the new value to notice a working → idle transition.
     pub(crate) last_agent_activity: Option<AgentActivity>,
     /// The agent finished a turn (working → idle) and no client is
-    /// viewing this session yet. The status bar paints that session
-    /// chip with the `agent_finished_background` fill.
+    /// viewing this session yet. The session bar and the agent bar paint
+    /// that chip with the `agent_finished_background` fill.
     pub finished_unseen: bool,
 }
 
@@ -624,7 +624,7 @@ impl Session {
     }
 
     /// Record the session's rolled-up agent activity. A working → idle
-    /// change is a finished turn: the status bar highlights it until
+    /// change is a finished turn: the session bar highlights it until
     /// [`Self::acknowledge_finished`]. Opening already at the prompt is
     /// not a finish, and starting another turn or the agent leaving
     /// clears a highlight that no longer applies.

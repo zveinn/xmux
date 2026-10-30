@@ -6,14 +6,15 @@ accent: "#7aa2f7"
 active_background: "#7aa2f7"
 active_foreground: "#1a1b26"
 
-# a session's chip on both bars after its agent finishes a turn, until
-# you view the session: fill and text (same unset rules as
-# active_foreground).
+# a session's chip on the session bar and the agent bar after its agent
+# finishes a turn, until you view the session: fill and text (same
+# unset rules as active_foreground).
 agent_finished_background: "#a855f7"
 agent_finished_foreground: "#1a1b26"
 
-# a session's chip on both bars while its agent is working: fill and
-# text. unset or blank = an ordinary chip (bar background, bar text).
+# a session's chip on the session bar and the agent bar while its agent
+# is working: fill and text. unset or blank = an ordinary chip (bar
+# background, bar text).
 # the open session keeps its active chip either way.
 agent_working_background: "#283457"
 agent_working_foreground: "#7dcfff"
@@ -39,27 +40,38 @@ scrollback_lines: 5000
 # over SSH when your terminal supports it)
 select_copy: true
 
-# status bar position: bottom (default), top, or hidden.
-# hidden draws no status bar; the panes take those rows.
-# sessions sit on the left, tabs of the active session on the right.
-# when the two would overlap, the tabs move up a line.
+# session bar position: bottom (default), top, or hidden.
+# hidden draws no session bar; the panes take those rows.
+# pins and running sessions, left-aligned, wrapping when they do not fit.
+# agent sessions have their own bar. tabs have their own bar.
 bar_position: bottom
+
+# tab bar position: bottom, top, or hidden; unset = same as
+# bar_position, including hidden.
+# tabs of the active session, left-aligned, wrapping when they do not fit.
+# uses bar_background and bar_foreground.
+tab_bar_position: bottom
 
 # agent bar position: bottom, top, or hidden; unset = same as
 # bar_position, including hidden.
-# sessions created with `xmux agent` sit on this bar, not the status bar.
-# on the same edge it stacks on the pane side: above the status bar at
-# the bottom, below it at the top. also omitted while there are no agents.
+# sessions created with `xmux agent` sit on this bar.
+# bars on the same edge keep a fixed order. at the top, top to bottom:
+# tab bar, session bar, agent bar. at the bottom, top to bottom:
+# agent bar, session bar, tab bar. a bar on the other edge is skipped
+# and the bars that remain keep that order. also omitted while there
+# are no agents.
 agent_bar_position: bottom
 
 # bar backgrounds. unset or blank = the terminal's own background.
+# bar_background is the session bar and the tab bar.
 # open and just-finished chips keep their own chip color on top.
 bar_background: "#1a1b26"
 agent_bar_background: "#24283b"
 
 # bar text. unset or blank = the terminal's own foreground, dimmed,
 # with reversed text on open and just-finished chips. when set, this
-# is the text color of every chip on that bar, except open and
+# is the text color of every chip on that bar (bar_foreground covers
+# the session bar and the tab bar), except open and
 # just-finished chips that set active_foreground /
 # agent_finished_foreground, and working chips that set
 # agent_working_foreground.

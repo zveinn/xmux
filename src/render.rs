@@ -24,7 +24,7 @@ use crate::Result;
 use crate::agent_status::AgentActivity;
 use crate::model::{Layout, Rect, Session, SplitDir, split_rect};
 
-/// One session drawn on the status bar.
+/// One session drawn on the session bar or the agent bar.
 pub struct BarSession {
     /// Index into the server's session vec when the session is running.
     /// Clicking the chip switches to it.
@@ -107,7 +107,7 @@ fn luminance(color: Color) -> Option<f64> {
     Some(0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b))
 }
 
-/// What a click on the status bar landed on.
+/// What a click on a bar landed on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarHit {
     /// A running session.
@@ -139,21 +139,27 @@ impl BarPosition {
     }
 }
 
-/// Where the status bar, the agent bar, and the pane area sit on one
-/// client's screen.
+/// Where the session bar, the tab bar, the agent bar, and the pane area
+/// sit on one client's screen.
 ///
 /// `content` is the pane area's size (origin is always the pane area's
 /// own top-left; `content_y` is where that lands on the screen). Each
-/// bar is a contiguous run of screen rows. When both bars share an edge
-/// the agent bar sits on the pane side: above the status bar at the
-/// bottom, below it at the top. A hidden bar has no row.
+/// bar is a contiguous run of screen rows. Bars on the same edge keep
+/// one order, outer edge toward the panes: tab bar, session bar, agent
+/// bar. Reading the screen top to bottom, that is tab, session, agent
+/// along the top, and agent, session, tab along the bottom. A bar on
+/// the other edge is skipped and the bars that remain keep the order.
+/// A hidden bar, or one with nothing to draw, has no row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Chrome {
     pub content: (u16, u16),
     pub content_y: u16,
-    /// First screen row of the bar, when it is shown.
-    pub bar_row: Option<u16>,
-    pub bar_rows: u16,
+    /// First screen row of the session bar, when it is shown.
+    pub session_row: Option<u16>,
+    pub session_rows: u16,
+    /// First screen row of the tab bar, when it is shown.
+    pub tab_row: Option<u16>,
+    pub tab_rows: u16,
     /// First screen row of the agent bar, when it is shown.
     pub agent_row: Option<u16>,
     pub agent_rows: u16,
@@ -161,84 +167,134 @@ pub struct Chrome {
 
 /// Screen geometry for one client.
 ///
-/// The status bar takes `bar_rows` once the terminal is at least two
-/// rows tall, and always leaves one row for the panes. The agent bar
-/// gets `agent_rows` of whatever the status bar left, still keeping
-/// one pane row. A bar on top shifts the pane area down. A hidden bar
-/// takes nothing, whatever row count the layout asked for. The row
-/// counts are the wrapped heights the layouts want; this only places
-/// the blocks and caps them.
+/// One row stays with the panes. The session bar takes its rows first,
+/// then the tab bar, then the agent bar, each from whatever is left.
+/// A bar on top shifts the pane area down. A hidden bar takes nothing,
+/// whatever row count the layout asked for. The row counts are the
+/// wrapped heights the layouts want; this only places the blocks and
+/// caps them.
+///
+/// On a shared edge the blocks stack tab, then session, then agent
+/// from the screen edge in toward the panes.
 pub fn chrome(
     size: (u16, u16),
-    bar_position: BarPosition,
-    bar_rows: u16,
+    session_position: BarPosition,
+    session_rows: u16,
+    tab_position: BarPosition,
+    tab_rows: u16,
     agent_position: BarPosition,
     agent_rows: u16,
 ) -> Chrome {
     let (cols, rows) = size;
     let budget = rows.saturating_sub(1);
-    let n = if bar_position.is_shown() {
-        bar_rows.min(budget)
-    } else {
-        0
-    };
-    let a = if agent_position.is_shown() {
-        agent_rows.min(budget - n)
-    } else {
-        0
-    };
-    let bar_top = bar_position.is_top();
-    let agent_top = agent_position.is_top();
-    let top_rows = if bar_top { n } else { 0 } + if agent_top { a } else { 0 };
-    let bottom_rows = n + a - top_rows;
-    let bar_row = (n > 0).then(|| if bar_top { 0 } else { rows - n });
-    let agent_row = (a > 0).then(|| match (agent_top, bar_top) {
-        (true, true) => n,
-        (true, false) => 0,
-        (false, false) => rows - n - a,
-        (false, true) => rows - a,
-    });
+    // Index 0 is the tab bar, 1 the session bar, 2 the agent bar:
+    // outer edge toward the panes.
+    let requested = [
+        (tab_position, tab_rows),
+        (session_position, session_rows),
+        (agent_position, agent_rows),
+    ];
+    let mut given = [0u16; 3];
+    let mut left = budget;
+    // The session bar keeps the rows it had when it was the status bar.
+    // The tab bar is next, and the agent bar takes what they leave.
+    for index in [1, 0, 2] {
+        let (position, want) = requested[index];
+        if position.is_shown() && left > 0 {
+            let n = want.min(left);
+            given[index] = n;
+            left -= n;
+        }
+    }
+
+    let mut top_used = 0u16;
+    let mut bottom_used = 0u16;
+    let mut origin = [None; 3];
+    for index in 0..3 {
+        let n = given[index];
+        if n == 0 {
+            continue;
+        }
+        if requested[index].0.is_top() {
+            origin[index] = Some(top_used);
+            top_used += n;
+        } else {
+            bottom_used += n;
+            origin[index] = Some(rows - bottom_used);
+        }
+    }
     Chrome {
-        content: (cols, rows - top_rows - bottom_rows),
-        content_y: top_rows,
-        bar_row,
-        bar_rows: n,
-        agent_row,
-        agent_rows: a,
+        content: (cols, rows - top_used - bottom_used),
+        content_y: top_used,
+        session_row: origin[1],
+        session_rows: given[1],
+        tab_row: origin[0],
+        tab_rows: given[0],
+        agent_row: origin[2],
+        agent_rows: given[2],
     }
 }
 
 /// The pane area of a client screen: everything except `bar_rows` of
-/// status bar. Sessions are laid out and shells sized to this, so it
-/// must be used for split and navigation geometry too. Which edge the
-/// bar sits on changes the pane origin, not this size.
+/// chrome. Sessions are laid out and shells sized to this, so it must
+/// be used for split and navigation geometry too. Which edge a bar sits
+/// on changes the pane origin, not this size.
 pub fn content_size(size: (u16, u16), bar_rows: u16) -> (u16, u16) {
-    chrome(size, BarPosition::Bottom, bar_rows, BarPosition::Bottom, 0).content
+    chrome(
+        size,
+        BarPosition::Bottom,
+        bar_rows,
+        BarPosition::Hidden,
+        0,
+        BarPosition::Hidden,
+        0,
+    )
+    .content
 }
 
-/// Both bars laid out for one client, and the screen geometry they
+/// The three bars laid out for one client, and the screen geometry they
 /// leave. Drawing, pane sizing, and click hit-testing all go through
-/// this so they agree on where everything is. The status bar is laid
-/// out first; the agent bar wraps into the rows it leaves. A hidden
-/// bar is zero rows, so it neither draws nor shrinks the other bar.
+/// this so they agree on where everything is. The session bar is laid
+/// out first, then the tab bar, then the agent bar, each wrapping into
+/// the rows the previous bars left. A hidden bar is zero rows, so it
+/// neither draws nor shrinks the others.
 pub fn screen_layout(
     items: &[BarSession],
     agent_items: &[BarSession],
     active: &Session,
     size: (u16, u16),
-    bar_position: BarPosition,
+    session_position: BarPosition,
+    tab_position: BarPosition,
     agent_position: BarPosition,
-) -> (Chrome, BarLayout, BarLayout) {
-    let bar_budget = if bar_position.is_shown() { size.1 } else { 0 };
-    let bar = bar_layout(items, active, size.0, bar_budget);
+) -> (Chrome, BarLayout, BarLayout, BarLayout) {
+    let session_budget = if session_position.is_shown() {
+        size.1
+    } else {
+        0
+    };
+    let session = session_bar_layout(items, size.0, session_budget);
+    let tab_budget = if tab_position.is_shown() {
+        size.1.saturating_sub(session.rows)
+    } else {
+        0
+    };
+    let tab = tab_bar_layout(active, size.0, tab_budget);
     let agent_budget = if agent_position.is_shown() {
-        size.1.saturating_sub(bar.rows)
+        size.1.saturating_sub(session.rows + tab.rows)
     } else {
         0
     };
     let agent = agent_bar_layout(agent_items, size.0, agent_budget);
-    let screen = chrome(size, bar_position, bar.rows, agent_position, agent.rows);
-    (screen, bar, agent)
+    let screen = chrome(
+        size,
+        session_position,
+        session.rows,
+        tab_position,
+        tab.rows,
+        agent_position,
+        agent.rows,
+    );
+    (screen, session, tab, agent)
 }
 
 /// Truncate to `max` display characters, ellipsized.
@@ -251,7 +307,7 @@ fn fit(s: &str, max: usize) -> String {
 }
 
 /// Draw one frame of the viewed session: the active tab's panes at their
-/// rectangles, dim divider lines between them, the status bar, and the
+/// rectangles, dim divider lines between them, the bars, and the
 /// focused pane's cursor.
 ///
 /// `full` repaints every cell instead of only the rows the panes marked
@@ -275,16 +331,18 @@ pub fn draw_session(
     bar_foreground: Option<Color>,
     agent_bar_foreground: Option<Color>,
     bar_position: BarPosition,
+    tab_position: BarPosition,
     agent_position: BarPosition,
     synchronized: bool,
     full: bool,
 ) -> Result<()> {
-    let (screen, layout, agent_layout) = screen_layout(
+    let (screen, session_layout, tab_layout, agent_layout) = screen_layout(
         bar_sessions,
         agent_sessions,
         session,
         size,
         bar_position,
+        tab_position,
         agent_position,
     );
     let area = Rect {
@@ -326,11 +384,29 @@ pub fn draw_session(
         draw_dividers(out, &tab.layout, area, focus_rect, accent)?;
     }
 
-    if let Some(origin) = screen.bar_row {
+    if let Some(origin) = screen.session_row {
         draw_bar(
             out,
-            &layout,
+            &session_layout,
             bar_sessions,
+            active,
+            session.active_tab,
+            active_chip,
+            finished_chip,
+            working_chip,
+            bar_background,
+            bar_foreground,
+            origin,
+            size.0,
+        )?;
+    }
+    if let Some(origin) = screen.tab_row {
+        // Tabs use the session bar's colors. Chip kind, not the session
+        // list, decides the paint, so the list can be empty.
+        draw_bar(
+            out,
+            &tab_layout,
+            &[],
             active,
             session.active_tab,
             active_chip,
@@ -392,95 +468,83 @@ struct Chip {
     label: String,
 }
 
-/// The status bar's chips. Drawing and click hit-testing share this, so
-/// they cannot disagree about where a session or a tab is.
+/// One bar's chips. Drawing and click hit-testing share this, so they
+/// cannot disagree about where a session or a tab is.
 ///
-/// Sessions sit on the left and tabs on the right of one row when both
-/// fit. When they would overlap, the tabs move up a line (and wrap
-/// upward, right-aligned, if they still do not fit) and the sessions
-/// stay below, left-aligned, wrapping onto further rows the same way.
-/// A chip wider than the screen is ellipsized so it still occupies one row.
+/// Chips sit on the left and wrap onto further rows. A chip wider than
+/// the screen is ellipsized so it still occupies one row. `rows` is how
+/// many screen rows the bar needs; zero means the bar is not drawn.
 pub struct BarLayout {
     chips: Vec<Placed>,
     pub rows: u16,
 }
 
-pub fn bar_layout(
-    items: &[BarSession],
-    active: &Session,
-    cols: u16,
-    screen_rows: u16,
-) -> BarLayout {
-    let cols = cols as usize;
-    let max_rows = if screen_rows < 2 {
-        0
-    } else {
-        (screen_rows - 1) as usize
-    };
-    if cols == 0 || max_rows == 0 {
-        return BarLayout {
-            chips: Vec::new(),
-            rows: 0,
-        };
-    }
-
-    let sessions: Vec<Chip> = items
+/// The session bar: pins and running sessions, left-aligned. Keeps one
+/// of `screen_rows` for the panes (and for the bars laid out after it).
+pub fn session_bar_layout(items: &[BarSession], cols: u16, screen_rows: u16) -> BarLayout {
+    let width = cols as usize;
+    let chips = items
         .iter()
         .map(|item| Chip {
             kind: ChipKind::Session {
                 index: item.index,
                 pin: item.pin,
             },
-            label: clamp_label(session_chip_label(item), cols),
+            label: clamp_label(session_chip_label(item), width),
         })
         .filter(|chip| !chip.label.is_empty())
         .collect();
-    let tabs: Vec<Chip> = active
+    chips_layout(chips, cols, screen_rows)
+}
+
+/// The tab bar: tabs of the session on screen, left-aligned. A
+/// fullscreened tab keeps the `[F]` mark in its label. Keeps one of
+/// `screen_rows` for the panes.
+pub fn tab_bar_layout(active: &Session, cols: u16, screen_rows: u16) -> BarLayout {
+    let width = cols as usize;
+    let chips = active
         .tabs
         .iter()
         .enumerate()
         .map(|(i, tab)| Chip {
             kind: ChipKind::Tab(i),
-            label: clamp_label(tab_chip_label(tab), cols),
+            label: clamp_label(tab_chip_label(tab), width),
         })
         .filter(|chip| !chip.label.is_empty())
         .collect();
-
-    let session_width = width_of(&sessions);
-    let tab_width = width_of(&tabs);
-    let chips = if session_width + tab_width <= cols {
-        place_shared_row(&sessions, &tabs, cols)
-    } else if max_rows == 1 {
-        place_clipped_row(&sessions, &tabs, cols)
-    } else {
-        place_stacked(&sessions, &tabs, cols, max_rows)
-    };
-    let rows = chips
-        .iter()
-        .map(|chip| chip.row)
-        .max()
-        .map_or(0, |row| row + 1);
-    BarLayout { chips, rows }
+    chips_layout(chips, cols, screen_rows)
 }
 
 /// The agent bar: agent sessions only, left-aligned, wrapping onto
 /// further rows. No agent sessions means no rows, so the bar is gone.
-/// Like [`bar_layout`], it keeps one of `screen_rows` for the panes.
+/// Like [`session_bar_layout`], it keeps one of `screen_rows` for the panes.
 pub fn agent_bar_layout(items: &[BarSession], cols: u16, screen_rows: u16) -> BarLayout {
-    let cols = cols as usize;
-    let max_rows = screen_rows.saturating_sub(1) as usize;
-    let sessions: Vec<Chip> = items
+    let width = cols as usize;
+    let chips = items
         .iter()
         .map(|item| Chip {
             kind: ChipKind::Session {
                 index: item.index,
                 pin: item.pin,
             },
-            label: clamp_label(session_chip_label(item), cols),
+            label: clamp_label(session_chip_label(item), width),
         })
         .filter(|chip| !chip.label.is_empty())
         .collect();
-    let chips = pack(&sessions, cols, false, max_rows, 0);
+    chips_layout(chips, cols, screen_rows)
+}
+
+/// Left-aligned chips, wrapping within `screen_rows - 1` rows.
+fn chips_layout(chips: Vec<Chip>, cols: u16, screen_rows: u16) -> BarLayout {
+    let width = cols as usize;
+    let max_rows = screen_rows.saturating_sub(1) as usize;
+    if width == 0 || max_rows == 0 {
+        return BarLayout {
+            chips: Vec::new(),
+            rows: 0,
+        };
+    }
+    let chips = pack(&chips, width, max_rows, 0);
     let rows = chips
         .iter()
         .map(|chip| chip.row)
@@ -506,19 +570,6 @@ impl BarLayout {
                 ChipKind::Session { .. } => None,
             })
     }
-}
-
-/// The session or tab whose chip covers `(row, x)` of the bar block.
-#[cfg(test)]
-pub fn bar_hit(
-    items: &[BarSession],
-    active: &Session,
-    cols: u16,
-    screen_rows: u16,
-    row: u16,
-    x: u16,
-) -> Option<BarHit> {
-    bar_layout(items, active, cols, screen_rows).hit(row, x)
 }
 
 /// How a run of text is styled.
@@ -591,11 +642,10 @@ fn apply_text_paint(
     Ok(())
 }
 
-/// Sessions on the left, tabs of the open session on the right. The
-/// open session and the open tab are `active` chips. A session whose
-/// agent just finished a turn, and that is not the one on screen, is a
-/// `finished` chip. A session whose agent is working is a `working`
-/// chip.
+/// Chips on one bar. The open session and the open tab are `active`
+/// chips. A session whose agent just finished a turn, and that is not
+/// the one on screen, is a `finished` chip. A session whose agent is
+/// working is a `working` chip.
 fn draw_bar(
     out: &mut impl Write,
     layout: &BarLayout,
@@ -702,157 +752,39 @@ fn clamp_label(label: String, cols: usize) -> String {
     }
 }
 
-fn width_of(chips: &[Chip]) -> usize {
-    chips.iter().map(|chip| chip.label.chars().count()).sum()
-}
-
-/// Both groups fit on one row: sessions flush left, tabs flush right.
-fn place_shared_row(sessions: &[Chip], tabs: &[Chip], cols: usize) -> Vec<Placed> {
-    let mut chips = place_run(sessions, 0, 0);
-    let tab_col = cols.saturating_sub(width_of(tabs)) as u16;
-    chips.extend(place_run(tabs, tab_col, 0));
-    chips
-}
-
-/// One row is all the screen will give. Keep chips from the front of
-/// each group and drop the ones that would overlap.
-fn place_clipped_row(sessions: &[Chip], tabs: &[Chip], cols: usize) -> Vec<Placed> {
-    let sessions = take_fitting(sessions, cols);
-    let tabs = take_fitting(tabs, cols.saturating_sub(width_of(&sessions)));
-    let mut chips = place_run(&sessions, 0, 0);
-    let tab_col = cols.saturating_sub(width_of(&tabs)) as u16;
-    chips.extend(place_run(&tabs, tab_col, 0));
-    chips
-}
-
-/// Tabs move up a line, right-aligned, and wrap upward if they still
-/// do not fit. Sessions stay on the rows below, left-aligned.
-fn place_stacked(sessions: &[Chip], tabs: &[Chip], cols: usize, max_rows: usize) -> Vec<Placed> {
-    let tab_need = row_count(tabs, cols);
-    let session_need = row_count(sessions, cols);
-    let (tab_rows, session_rows) = allocate_rows(tab_need, session_need, max_rows);
-    let mut chips = pack(tabs, cols, true, tab_rows, 0);
-    let session_base = chips
-        .iter()
-        .map(|chip| chip.row)
-        .max()
-        .map_or(0, |row| row + 1);
-    chips.extend(pack(sessions, cols, false, session_rows, session_base));
-    chips
-}
-
-/// Split `max_rows` between the two sides. Each side that has chips
-/// keeps a row when there are two or more rows to give.
-fn allocate_rows(tab_need: usize, session_need: usize, max_rows: usize) -> (usize, usize) {
-    if max_rows == 0 {
-        return (0, 0);
-    }
-    if tab_need + session_need <= max_rows {
-        return (tab_need, session_need);
-    }
-    if tab_need == 0 {
-        return (0, session_need.min(max_rows));
-    }
-    if session_need == 0 {
-        return (tab_need.min(max_rows), 0);
-    }
-    if max_rows == 1 {
-        return (1, 0);
-    }
-    let mut tabs = 1;
-    let mut sessions = 1;
-    let mut extra = max_rows - 2;
-    let tab_extra = tab_need.saturating_sub(1).min(extra);
-    tabs += tab_extra;
-    extra -= tab_extra;
-    sessions += session_need.saturating_sub(1).min(extra);
-    (tabs, sessions)
-}
-
-fn row_count(chips: &[Chip], cols: usize) -> usize {
-    pack(chips, cols, false, usize::MAX, 0)
-        .iter()
-        .map(|chip| chip.row)
-        .max()
-        .map_or(0, |row| row as usize + 1)
-}
-
-/// `right` packs each wrapped row against the right edge. Sessions pass
-/// `false` and stay on the left.
-fn pack(chips: &[Chip], cols: usize, right: bool, max_rows: usize, row_base: u16) -> Vec<Placed> {
+/// Left-aligned chips. A row that would run past `cols` wraps, and rows
+/// past `max_rows` are dropped.
+fn pack(chips: &[Chip], cols: usize, max_rows: usize, row_base: u16) -> Vec<Placed> {
     if max_rows == 0 || cols == 0 {
         return Vec::new();
     }
     let mut placed = Vec::new();
-    let mut current: Vec<Chip> = Vec::new();
-    let mut used = 0usize;
+    let mut x = 0u16;
+    let mut row = row_base;
     let mut rows = 0usize;
     for chip in chips {
         let w = chip.label.chars().count();
         if w == 0 || w > cols {
             continue;
         }
-        if !current.is_empty() && used + w > cols {
-            placed.extend(place_row(&current, cols, right, row_base + rows as u16));
-            current.clear();
-            used = 0;
+        let width = w as u16;
+        if x > 0 && x as usize + w > cols {
             rows += 1;
             if rows >= max_rows {
                 return placed;
             }
+            row += 1;
+            x = 0;
         }
-        used += w;
-        current.push(Chip {
-            kind: chip.kind,
-            label: chip.label.clone(),
-        });
-    }
-    if !current.is_empty() && rows < max_rows {
-        placed.extend(place_row(&current, cols, right, row_base + rows as u16));
-    }
-    placed
-}
-
-fn place_row(chips: &[Chip], cols: usize, right: bool, row: u16) -> Vec<Placed> {
-    let start = if right {
-        cols.saturating_sub(width_of(chips)) as u16
-    } else {
-        0
-    };
-    place_run(chips, start, row)
-}
-
-fn place_run(chips: &[Chip], start: u16, row: u16) -> Vec<Placed> {
-    let mut x = start;
-    let mut out = Vec::with_capacity(chips.len());
-    for chip in chips {
-        let w = chip.label.chars().count() as u16;
-        out.push(Placed {
+        placed.push(Placed {
             kind: chip.kind,
             label: chip.label.clone(),
             col: x,
             row,
         });
-        x += w;
+        x += width;
     }
-    out
-}
-
-fn take_fitting(chips: &[Chip], cols: usize) -> Vec<Chip> {
-    let mut kept = Vec::new();
-    let mut used = 0usize;
-    for chip in chips {
-        let w = chip.label.chars().count();
-        if used + w > cols {
-            break;
-        }
-        used += w;
-        kept.push(Chip {
-            kind: chip.kind,
-            label: chip.label.clone(),
-        });
-    }
-    kept
+    placed
 }
 
 /// Blank a bar row from column 0.
@@ -1611,19 +1543,12 @@ mod tests {
         chip(Some(index), None, name, activity, finished)
     }
 
-    fn laid_out(items: &[BarSession], session: &Session, cols: u16, rows: u16) -> BarLayout {
-        bar_layout(items, session, cols, rows)
+    fn laid_out(items: &[BarSession], cols: u16, rows: u16) -> BarLayout {
+        session_bar_layout(items, cols, rows)
     }
 
-    fn hit(
-        items: &[BarSession],
-        session: &Session,
-        cols: u16,
-        rows: u16,
-        row: u16,
-        x: u16,
-    ) -> Option<BarHit> {
-        bar_hit(items, session, cols, rows, row, x)
+    fn hit(items: &[BarSession], cols: u16, rows: u16, row: u16, x: u16) -> Option<BarHit> {
+        session_bar_layout(items, cols, rows).hit(row, x)
     }
 
     fn view(name: &str, tabs: &[&str]) -> Session {
@@ -1666,150 +1591,289 @@ mod tests {
         assert_eq!(content_size((80, 1), 1), (80, 1));
     }
 
+    /// `chrome(size, session edge, session rows, tab edge, tab rows, agent edge, agent rows)`.
+    fn placed(
+        size: (u16, u16),
+        session: (BarPosition, u16),
+        tab: (BarPosition, u16),
+        agent: (BarPosition, u16),
+    ) -> Chrome {
+        chrome(size, session.0, session.1, tab.0, tab.1, agent.0, agent.1)
+    }
+
     #[test]
-    fn chrome_puts_the_bar_on_the_configured_edge() {
-        let bottom = chrome((80, 24), BarPosition::Bottom, 1, BarPosition::Bottom, 0);
-        assert_eq!(bottom.bar_row, Some(23));
-        assert_eq!(bottom.bar_rows, 1);
+    fn chrome_puts_each_bar_on_its_configured_edge() {
+        let bottom = placed(
+            (80, 24),
+            (BarPosition::Bottom, 1),
+            (BarPosition::Hidden, 0),
+            (BarPosition::Hidden, 0),
+        );
+        assert_eq!(bottom.session_row, Some(23));
+        assert_eq!(bottom.session_rows, 1);
+        assert_eq!(bottom.tab_row, None);
         assert_eq!(bottom.content, (80, 23));
         assert_eq!(bottom.content_y, 0);
 
-        let top = chrome((80, 24), BarPosition::Top, 1, BarPosition::Bottom, 0);
-        assert_eq!(top.bar_row, Some(0));
-        assert_eq!(top.bar_rows, 1);
+        let top = placed(
+            (80, 24),
+            (BarPosition::Top, 1),
+            (BarPosition::Hidden, 0),
+            (BarPosition::Hidden, 0),
+        );
+        assert_eq!(top.session_row, Some(0));
+        assert_eq!(top.session_rows, 1);
         assert_eq!(top.content_y, 1);
         assert_eq!(top.content, (80, 23));
 
-        // Wrapped bar: tabs occupy the upper row of the block, sessions
-        // the lower one. On the bottom edge that puts sessions on the
-        // last screen row; on the top edge, tabs are row 0.
-        let stacked_bottom = chrome((80, 24), BarPosition::Bottom, 2, BarPosition::Bottom, 0);
-        assert_eq!(stacked_bottom.bar_row, Some(22));
+        // A wrapped session bar is one block. On the bottom its first
+        // row is above the last screen row; on the top it starts at 0.
+        let stacked_bottom = placed(
+            (80, 24),
+            (BarPosition::Bottom, 2),
+            (BarPosition::Hidden, 0),
+            (BarPosition::Hidden, 0),
+        );
+        assert_eq!(stacked_bottom.session_row, Some(22));
         assert_eq!(stacked_bottom.content, (80, 22));
         assert_eq!(stacked_bottom.content_y, 0);
 
-        let stacked_top = chrome((80, 24), BarPosition::Top, 2, BarPosition::Bottom, 0);
-        assert_eq!(stacked_top.bar_row, Some(0));
-        assert_eq!(stacked_top.bar_rows, 2);
+        let stacked_top = placed(
+            (80, 24),
+            (BarPosition::Top, 2),
+            (BarPosition::Hidden, 0),
+            (BarPosition::Hidden, 0),
+        );
+        assert_eq!(stacked_top.session_row, Some(0));
+        assert_eq!(stacked_top.session_rows, 2);
         assert_eq!(stacked_top.content_y, 2);
         assert_eq!(stacked_top.content, (80, 22));
     }
 
     #[test]
-    fn the_agent_bar_sits_on_the_pane_side_of_a_shared_edge() {
-        // Both at the bottom: agent bar directly above the status bar.
-        let bottom = chrome((80, 24), BarPosition::Bottom, 1, BarPosition::Bottom, 2);
-        assert_eq!(bottom.bar_row, Some(23));
-        assert_eq!(bottom.agent_row, Some(21));
-        assert_eq!(bottom.agent_rows, 2);
-        assert_eq!(bottom.content, (80, 21));
-        assert_eq!(bottom.content_y, 0);
+    fn bars_on_one_edge_stack_tab_then_session_then_agent_toward_the_panes() {
+        // Top, top to bottom: tab (2), session (1), agent (1), then panes.
+        let top = placed(
+            (80, 24),
+            (BarPosition::Top, 1),
+            (BarPosition::Top, 2),
+            (BarPosition::Top, 1),
+        );
+        assert_eq!(top.tab_row, Some(0));
+        assert_eq!(top.tab_rows, 2);
+        assert_eq!(top.session_row, Some(2));
+        assert_eq!(top.session_rows, 1);
+        assert_eq!(top.agent_row, Some(3));
+        assert_eq!(top.agent_rows, 1);
+        assert_eq!(top.content_y, 4);
+        assert_eq!(top.content, (80, 20));
 
-        // Both at the top: agent bar directly below the status bar.
-        let top = chrome((80, 24), BarPosition::Top, 2, BarPosition::Top, 1);
-        assert_eq!(top.bar_row, Some(0));
-        assert_eq!(top.agent_row, Some(2));
-        assert_eq!(top.content, (80, 21));
-        assert_eq!(top.content_y, 3);
+        // Bottom, top to bottom: agent, session, tab.
+        let bottom = placed(
+            (80, 24),
+            (BarPosition::Bottom, 1),
+            (BarPosition::Bottom, 2),
+            (BarPosition::Bottom, 1),
+        );
+        assert_eq!(bottom.agent_row, Some(20));
+        assert_eq!(bottom.agent_rows, 1);
+        assert_eq!(bottom.session_row, Some(21));
+        assert_eq!(bottom.session_rows, 1);
+        assert_eq!(bottom.tab_row, Some(22));
+        assert_eq!(bottom.tab_rows, 2);
+        assert_eq!(bottom.content_y, 0);
+        assert_eq!(bottom.content, (80, 20));
     }
 
     #[test]
-    fn the_agent_bar_can_take_the_other_edge() {
-        let agent_top = chrome((80, 24), BarPosition::Bottom, 1, BarPosition::Top, 1);
-        assert_eq!(agent_top.agent_row, Some(0));
-        assert_eq!(agent_top.bar_row, Some(23));
-        assert_eq!(agent_top.content, (80, 22));
-        assert_eq!(agent_top.content_y, 1);
+    fn each_edge_keeps_that_order_when_the_bars_split() {
+        // Tab on top. Session and agent on the bottom: agent, then session.
+        let tab_top = placed(
+            (80, 24),
+            (BarPosition::Bottom, 1),
+            (BarPosition::Top, 1),
+            (BarPosition::Bottom, 2),
+        );
+        assert_eq!(tab_top.tab_row, Some(0));
+        assert_eq!(tab_top.agent_row, Some(21));
+        assert_eq!(tab_top.agent_rows, 2);
+        assert_eq!(tab_top.session_row, Some(23));
+        assert_eq!(tab_top.content_y, 1);
+        assert_eq!(tab_top.content, (80, 20));
 
-        let agent_bottom = chrome((80, 24), BarPosition::Top, 1, BarPosition::Bottom, 1);
-        assert_eq!(agent_bottom.bar_row, Some(0));
-        assert_eq!(agent_bottom.agent_row, Some(23));
-        assert_eq!(agent_bottom.content, (80, 22));
-        assert_eq!(agent_bottom.content_y, 1);
+        // Session on top. Agent and tab on the bottom: agent, then tab.
+        let session_top = placed(
+            (80, 24),
+            (BarPosition::Top, 1),
+            (BarPosition::Bottom, 1),
+            (BarPosition::Bottom, 1),
+        );
+        assert_eq!(session_top.session_row, Some(0));
+        assert_eq!(session_top.agent_row, Some(22));
+        assert_eq!(session_top.tab_row, Some(23));
+        assert_eq!(session_top.content_y, 1);
+        assert_eq!(session_top.content, (80, 21));
+
+        // Agent on top, the other two on the bottom: session, then tab.
+        let agent_top = placed(
+            (80, 24),
+            (BarPosition::Bottom, 1),
+            (BarPosition::Bottom, 1),
+            (BarPosition::Top, 1),
+        );
+        assert_eq!(agent_top.agent_row, Some(0));
+        assert_eq!(agent_top.session_row, Some(22));
+        assert_eq!(agent_top.tab_row, Some(23));
+        assert_eq!(agent_top.content_y, 1);
+        assert_eq!(agent_top.content, (80, 21));
     }
 
     #[test]
     fn no_agents_means_no_agent_bar_and_panes_keep_a_row() {
-        let none = chrome((80, 24), BarPosition::Bottom, 1, BarPosition::Bottom, 0);
+        let none = placed(
+            (80, 24),
+            (BarPosition::Bottom, 1),
+            (BarPosition::Hidden, 0),
+            (BarPosition::Bottom, 0),
+        );
         assert_eq!(none.agent_row, None);
         assert_eq!(none.content, (80, 23));
 
-        // Three rows: status bar 1, agent bar 1, panes 1 — the agent
+        // Three rows: session bar 1, agent bar 1, panes 1. The agent
         // bar never eats the last pane row.
-        let tight = chrome((80, 3), BarPosition::Bottom, 1, BarPosition::Bottom, 5);
+        let tight = placed(
+            (80, 3),
+            (BarPosition::Bottom, 1),
+            (BarPosition::Hidden, 0),
+            (BarPosition::Bottom, 5),
+        );
         assert_eq!(tight.agent_rows, 1);
         assert_eq!(tight.agent_row, Some(1));
+        assert_eq!(tight.session_row, Some(2));
         assert_eq!(tight.content, (80, 1));
-        let full = chrome((80, 2), BarPosition::Bottom, 1, BarPosition::Top, 1);
+        let full = placed(
+            (80, 2),
+            (BarPosition::Bottom, 1),
+            (BarPosition::Hidden, 0),
+            (BarPosition::Top, 1),
+        );
         assert_eq!(full.agent_row, None);
         assert_eq!(full.content, (80, 1));
     }
 
     #[test]
     fn a_hidden_bar_takes_no_rows() {
-        // The status bar's requested rows are ignored, and the agent
+        // The session bar's requested rows are ignored, and the agent
         // bar sits on the bottom edge with no gap above it.
-        let no_status = chrome((80, 24), BarPosition::Hidden, 3, BarPosition::Bottom, 2);
-        assert_eq!(no_status.bar_row, None);
-        assert_eq!(no_status.bar_rows, 0);
-        assert_eq!(no_status.agent_row, Some(22));
-        assert_eq!(no_status.agent_rows, 2);
-        assert_eq!(no_status.content, (80, 22));
-        assert_eq!(no_status.content_y, 0);
+        let no_session = placed(
+            (80, 24),
+            (BarPosition::Hidden, 3),
+            (BarPosition::Hidden, 4),
+            (BarPosition::Bottom, 2),
+        );
+        assert_eq!(no_session.session_row, None);
+        assert_eq!(no_session.session_rows, 0);
+        assert_eq!(no_session.tab_row, None);
+        assert_eq!(no_session.agent_row, Some(22));
+        assert_eq!(no_session.agent_rows, 2);
+        assert_eq!(no_session.content, (80, 22));
+        assert_eq!(no_session.content_y, 0);
 
-        let no_agent = chrome((80, 24), BarPosition::Top, 1, BarPosition::Hidden, 4);
+        let no_agent = placed(
+            (80, 24),
+            (BarPosition::Top, 1),
+            (BarPosition::Hidden, 0),
+            (BarPosition::Hidden, 4),
+        );
         assert_eq!(no_agent.agent_row, None);
         assert_eq!(no_agent.agent_rows, 0);
-        assert_eq!(no_agent.bar_row, Some(0));
+        assert_eq!(no_agent.session_row, Some(0));
         assert_eq!(no_agent.content, (80, 23));
         assert_eq!(no_agent.content_y, 1);
 
-        let neither = chrome((80, 24), BarPosition::Hidden, 1, BarPosition::Hidden, 1);
-        assert_eq!(neither.bar_row, None);
+        let neither = placed(
+            (80, 24),
+            (BarPosition::Hidden, 1),
+            (BarPosition::Hidden, 1),
+            (BarPosition::Hidden, 1),
+        );
+        assert_eq!(neither.session_row, None);
+        assert_eq!(neither.tab_row, None);
         assert_eq!(neither.agent_row, None);
         assert_eq!(neither.content, (80, 24));
         assert_eq!(neither.content_y, 0);
 
-        // Hidden status bar, agent bar at the top: row 0, no gap.
-        let agent_top = chrome((80, 24), BarPosition::Hidden, 1, BarPosition::Top, 1);
+        // Hidden session bar, agent bar at the top: row 0, no gap.
+        let agent_top = placed(
+            (80, 24),
+            (BarPosition::Hidden, 1),
+            (BarPosition::Hidden, 0),
+            (BarPosition::Top, 1),
+        );
         assert_eq!(agent_top.agent_row, Some(0));
-        assert_eq!(agent_top.bar_row, None);
+        assert_eq!(agent_top.session_row, None);
         assert_eq!(agent_top.content_y, 1);
         assert_eq!(agent_top.content, (80, 23));
     }
 
     #[test]
-    fn a_hidden_status_bar_does_not_shrink_the_agent_bar() {
+    fn a_short_screen_keeps_the_session_bar_ahead_of_the_others() {
+        // Two chrome rows and one pane row. Session and tab each want
+        // one, so the agent bar is dropped even though it asked for more.
+        let tight = placed(
+            (80, 3),
+            (BarPosition::Bottom, 1),
+            (BarPosition::Bottom, 1),
+            (BarPosition::Bottom, 5),
+        );
+        assert_eq!(tight.session_rows, 1);
+        assert_eq!(tight.tab_rows, 1);
+        assert_eq!(tight.agent_rows, 0);
+        assert_eq!(tight.agent_row, None);
+        // Bottom, top to bottom: session, then tab.
+        assert_eq!(tight.session_row, Some(1));
+        assert_eq!(tight.tab_row, Some(2));
+        assert_eq!(tight.content, (80, 1));
+    }
+
+    #[test]
+    fn a_hidden_session_bar_does_not_shrink_the_agent_bar() {
         let session = view("meow", &["shell"]);
         let agents = vec![
             running(1, "claude-1", None, false),
             running(2, "grok-2", None, false),
         ];
         // 12 columns wraps these two chips (see the wrap test). Three
-        // screen rows: a shown status bar would leave the agent bar one
-        // row, so the second chip would be dropped.
-        let (shown, _, agent_shown) = screen_layout(
-            &[],
+        // screen rows: a session chip leaves the agent bar one row, so
+        // the second agent chip is dropped. The tab bar is hidden in
+        // both cases. An empty session bar takes no row.
+        let items = vec![running(0, "meow", None, false)];
+        let (shown, session_bar, _, agent_shown) = screen_layout(
+            &items,
             &agents,
             &session,
             (12, 3),
             BarPosition::Bottom,
+            BarPosition::Hidden,
             BarPosition::Bottom,
         );
+        assert_eq!(session_bar.rows, 1);
         assert_eq!(agent_shown.rows, 1);
         assert_eq!(shown.content, (12, 1));
 
-        let (hidden, bar, agent) = screen_layout(
+        let (hidden, bar, tab, agent) = screen_layout(
             &[],
             &agents,
             &session,
             (12, 3),
             BarPosition::Hidden,
+            BarPosition::Hidden,
             BarPosition::Bottom,
         );
         assert_eq!(bar.rows, 0);
+        assert_eq!(tab.rows, 0);
         assert_eq!(agent.rows, 2);
-        assert_eq!(hidden.bar_row, None);
+        assert_eq!(hidden.session_row, None);
         assert_eq!(hidden.agent_rows, 2);
         assert_eq!(hidden.content, (12, 1));
     }
@@ -1889,132 +1953,104 @@ mod tests {
     }
 
     #[test]
-    fn shared_row_puts_sessions_left_and_tabs_right() {
-        // " work " is 6 columns, " shell " is 7. Together they fit in 20.
+    fn session_and_tab_chips_sit_on_their_own_bars() {
+        // " work " is 6 columns, " shell " is 7. They used to share a row.
+        // Each bar is left-aligned on its own row, and a click hits that bar.
         let items = vec![running(3, "work", None, false)];
         let session = view("work", &["shell"]);
-        let layout = laid_out(&items, &session, 20, 24);
-        assert_eq!(layout.rows, 1);
-        assert_eq!(
-            labels_on(&layout, 0),
-            vec![(" work ".into(), 0), (" shell ".into(), 13)]
-        );
-        assert_eq!(
-            hit(&items, &session, 20, 24, 0, 0),
-            Some(BarHit::Session(3))
-        );
-        assert_eq!(
-            hit(&items, &session, 20, 24, 0, 5),
-            Some(BarHit::Session(3))
-        );
-        assert_eq!(hit(&items, &session, 20, 24, 0, 6), None);
-        assert_eq!(hit(&items, &session, 20, 24, 0, 13), Some(BarHit::Tab(0)));
-        assert_eq!(hit(&items, &session, 20, 24, 0, 19), Some(BarHit::Tab(0)));
-        assert_eq!(hit(&items, &session, 20, 24, 0, 20), None);
+        let sessions = laid_out(&items, 20, 24);
+        let tabs = tab_bar_layout(&session, 20, 24);
+        assert_eq!(sessions.rows, 1);
+        assert_eq!(tabs.rows, 1);
+        assert_eq!(labels_on(&sessions, 0), vec![(" work ".into(), 0)]);
+        assert_eq!(labels_on(&tabs, 0), vec![(" shell ".into(), 0)]);
+        assert_eq!(hit(&items, 20, 24, 0, 0), Some(BarHit::Session(3)));
+        assert_eq!(hit(&items, 20, 24, 0, 5), Some(BarHit::Session(3)));
+        assert_eq!(hit(&items, 20, 24, 0, 6), None);
+        assert_eq!(tabs.hit(0, 0), Some(BarHit::Tab(0)));
+        assert_eq!(tabs.hit(0, 6), Some(BarHit::Tab(0)));
+        assert_eq!(tabs.hit(0, 7), None);
     }
 
     #[test]
-    fn overlap_stacks_tabs_above_sessions() {
-        // " work " is 6 and " shell " is 7, which does not fit in 11. The
-        // tab moves up and stays on the right (11 - 7 = 4); the session
-        // stays on the left.
-        let items = vec![running(3, "work", None, false)];
-        let session = view("work", &["shell"]);
-        let layout = laid_out(&items, &session, 11, 24);
-        assert_eq!(layout.rows, 2);
-        assert_eq!(labels_on(&layout, 0), vec![(" shell ".into(), 4)]);
-        assert_eq!(labels_on(&layout, 1), vec![(" work ".into(), 0)]);
-        assert_eq!(hit(&items, &session, 11, 24, 0, 3), None);
-        assert_eq!(hit(&items, &session, 11, 24, 0, 4), Some(BarHit::Tab(0)));
-        assert_eq!(
-            hit(&items, &session, 11, 24, 1, 0),
-            Some(BarHit::Session(3))
-        );
-    }
-
-    #[test]
-    fn sessions_and_tabs_wrap_onto_extra_rows() {
+    fn session_and_tab_chips_wrap_on_their_own_bars() {
         // Session chips are 6 columns; tab chips are 7. Width 14 holds
-        // two of either. Three sessions and three tabs cannot share a
-        // row, so tabs wrap on top (2 rows) and sessions below (2 rows).
+        // two of either, so three of each wrap onto a second row.
         let items = vec![
             running(0, "work", None, false),
             running(1, "meow", None, false),
             running(2, "abcd", None, false),
         ];
         let session = view("work", &["shell", "build", "tests"]);
-        let layout = laid_out(&items, &session, 14, 24);
-        assert_eq!(layout.rows, 4);
+        let sessions = laid_out(&items, 14, 24);
+        let tabs = tab_bar_layout(&session, 14, 24);
+        assert_eq!(sessions.rows, 2);
+        assert_eq!(tabs.rows, 2);
         assert_eq!(
-            labels_on(&layout, 0),
-            vec![(" shell ".into(), 0), (" build ".into(), 7)]
-        );
-        // The leftover tab row is right-aligned: 14 - 7 = 7.
-        assert_eq!(labels_on(&layout, 1), vec![(" tests ".into(), 7)]);
-        assert_eq!(
-            labels_on(&layout, 2),
+            labels_on(&sessions, 0),
             vec![(" work ".into(), 0), (" meow ".into(), 6)]
         );
-        assert_eq!(labels_on(&layout, 3), vec![(" abcd ".into(), 0)]);
-        assert_eq!(hit(&items, &session, 14, 24, 1, 7), Some(BarHit::Tab(2)));
+        assert_eq!(labels_on(&sessions, 1), vec![(" abcd ".into(), 0)]);
         assert_eq!(
-            hit(&items, &session, 14, 24, 3, 0),
-            Some(BarHit::Session(2))
+            labels_on(&tabs, 0),
+            vec![(" shell ".into(), 0), (" build ".into(), 7)]
         );
+        assert_eq!(labels_on(&tabs, 1), vec![(" tests ".into(), 0)]);
+        assert_eq!(hit(&items, 14, 24, 1, 0), Some(BarHit::Session(2)));
+        assert_eq!(tabs.hit(1, 0), Some(BarHit::Tab(2)));
     }
 
     #[test]
-    fn a_short_screen_keeps_one_row_of_each_side() {
-        // Three sessions need two rows and three tabs need two, four in
-        // all. A 3-row screen can spare two bar rows, one per side, so
-        // the third chip of each side is dropped.
+    fn a_one_row_budget_drops_the_chips_that_do_not_fit() {
+        // " work ", " meow ", and " abcd " are 6 columns. Width 14 holds
+        // two, and a 2-row screen leaves this bar a single row.
         let items = vec![
             running(0, "work", None, false),
             running(1, "meow", None, false),
             running(2, "abcd", None, false),
         ];
-        let session = view("work", &["shell", "build", "tests"]);
-        let layout = laid_out(&items, &session, 14, 3);
-        assert_eq!(layout.rows, 2);
-        assert_eq!(
-            labels_on(&layout, 0),
-            vec![(" shell ".into(), 0), (" build ".into(), 7)]
-        );
-        assert_eq!(
-            labels_on(&layout, 1),
-            vec![(" work ".into(), 0), (" meow ".into(), 6)]
-        );
-        assert_eq!(hit(&items, &session, 14, 3, 0, 0), Some(BarHit::Tab(0)));
-        assert_eq!(hit(&items, &session, 14, 3, 1, 0), Some(BarHit::Session(0)));
-    }
-
-    #[test]
-    fn one_row_budget_clips_instead_of_overlapping() {
-        // " work " is 6, " shell " and " build " are 7. Width 16 holds the
-        // session and the first tab (6 + 7) and drops the second tab.
-        let items = vec![running(1, "work", None, false)];
-        let session = view("work", &["shell", "build"]);
-        let layout = laid_out(&items, &session, 16, 2);
+        let layout = laid_out(&items, 14, 2);
         assert_eq!(layout.rows, 1);
         assert_eq!(
             labels_on(&layout, 0),
-            vec![(" work ".into(), 0), (" shell ".into(), 9)]
+            vec![(" work ".into(), 0), (" meow ".into(), 6)]
         );
-        assert_eq!(hit(&items, &session, 16, 2, 0, 9), Some(BarHit::Tab(0)));
-        assert_eq!(hit(&items, &session, 16, 2, 0, 8), None);
+        assert_eq!(hit(&items, 14, 2, 0, 0), Some(BarHit::Session(0)));
+        assert_eq!(layout.hit(1, 0), None);
+    }
+
+    #[test]
+    fn a_short_screen_gives_the_session_bar_its_row_before_the_tab_bar() {
+        let items = vec![running(0, "work", None, false)];
+        let agents = vec![running(1, "claude-1", None, false)];
+        let session = view("work", &["shell"]);
+        // Three rows: one for the panes, two for bars. Session and tab
+        // each need one, so the agent bar is omitted.
+        let (screen, sessions, tabs, agent) = screen_layout(
+            &items,
+            &agents,
+            &session,
+            (40, 3),
+            BarPosition::Bottom,
+            BarPosition::Top,
+            BarPosition::Bottom,
+        );
+        assert_eq!(sessions.rows, 1);
+        assert_eq!(tabs.rows, 1);
+        assert_eq!(agent.rows, 0);
+        assert_eq!(screen.tab_row, Some(0));
+        assert_eq!(screen.session_row, Some(2));
+        assert_eq!(screen.agent_row, None);
+        assert_eq!(screen.content, (40, 1));
     }
 
     #[test]
     fn a_chip_wider_than_the_screen_is_ellipsized() {
         let items = vec![running(0, "workspace", None, false)];
-        let session = view("workspace", &["sh"]);
-        // " workspace " is 11 columns. Width 5 keeps an ellipsized chip
-        // on its own row, and the tab still gets the row above it,
-        // right-aligned: " sh " is 4 columns, so it starts at column 1.
-        let layout = laid_out(&items, &session, 5, 24);
-        assert_eq!(layout.rows, 2);
-        assert_eq!(labels_on(&layout, 0), vec![(" sh ".into(), 1)]);
-        let sessions = labels_on(&layout, 1);
+        // " workspace " is 11 columns. Width 5 keeps an ellipsized chip.
+        let layout = laid_out(&items, 5, 24);
+        assert_eq!(layout.rows, 1);
+        let sessions = labels_on(&layout, 0);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].1, 0);
         assert_eq!(sessions[0].0.chars().count(), 5);
@@ -2027,18 +2063,13 @@ mod tests {
             running(0, "work", Some(AgentActivity::Working), false),
             running(1, "notes", Some(AgentActivity::Idle), true),
         ];
-        let session = view("work", &["shell"]);
         // " work " is 6 columns, " notes " is 7. The activity does not
         // change the label; the letter color is applied at paint time.
-        let laid = laid_out(&items, &session, 40, 24);
+        let laid = laid_out(&items, 40, 24);
         assert_eq!(laid.rows, 1);
         assert_eq!(
             labels_on(&laid, 0),
-            vec![
-                (" work ".into(), 0),
-                (" notes ".into(), 6),
-                (" shell ".into(), 33),
-            ]
+            vec![(" work ".into(), 0), (" notes ".into(), 6)]
         );
     }
 
@@ -2048,29 +2079,23 @@ mod tests {
             chip(None, Some(2), "meow", None, false),
             chip(Some(4), Some(0), "work", None, false),
         ];
-        let session = view("work", &["shell"]);
-        assert_eq!(hit(&items, &session, 40, 24, 0, 0), Some(BarHit::Pin(2)));
+        assert_eq!(hit(&items, 40, 24, 0, 0), Some(BarHit::Pin(2)));
         // " meow " is 6 columns, so the trailing space is still the pin
         // and the running session starts at 6.
-        assert_eq!(hit(&items, &session, 40, 24, 0, 5), Some(BarHit::Pin(2)));
-        assert_eq!(
-            hit(&items, &session, 40, 24, 0, 6),
-            Some(BarHit::Session(4))
-        );
+        assert_eq!(hit(&items, 40, 24, 0, 5), Some(BarHit::Pin(2)));
+        assert_eq!(hit(&items, 40, 24, 0, 6), Some(BarHit::Session(4)));
     }
 
     #[test]
-    fn the_bar_draws_the_tabs_on_the_right_after_clearing_the_row() {
-        let items = vec![running(0, "work", None, false)];
+    fn the_tab_bar_draws_its_chip_after_clearing_the_row() {
         let session = view("work", &["shell"]);
-        // " shell " is 7 columns. Width 20 puts it at column 13:
-        // MoveTo(13, 5) is ESC[6;14H.
-        let layout = laid_out(&items, &session, 20, 24);
+        // Left-aligned on row 5: MoveTo(0, 5) is ESC[6;1H.
+        let layout = tab_bar_layout(&session, 20, 24);
         let mut buf = Vec::new();
         draw_bar(
             &mut buf,
             &layout,
-            &items,
+            &[],
             0,
             0,
             ChipColor::fill(Color::Cyan),
@@ -2083,10 +2108,13 @@ mod tests {
         )
         .unwrap();
         let text = String::from_utf8(buf).unwrap();
+        // The row is erased before the chip is printed. The chip starts
+        // at column 0, so its cursor jump is the same address the fill
+        // uses; the label is what has to follow the erase.
         let clear = text.find("\u{1b}[K").expect(&text);
-        let jump = text.find("\u{1b}[6;14H").expect(&text);
         let label = text.find(" shell ").expect(&text);
-        assert!(clear < jump && jump < label, "{text:?}");
+        assert!(clear < label, "{text:?}");
+        assert!(text.contains("\u{1b}[6;1H"), "{text:?}");
     }
 
     #[test]
@@ -2096,11 +2124,10 @@ mod tests {
             running(2, "notes", Some(AgentActivity::Idle), false),
         ];
         let session = view("work", &["shell", "build"]);
-        let layout = laid_out(&items, &session, 80, 24);
         let mut buf = Vec::new();
         draw_bar(
             &mut buf,
-            &layout,
+            &laid_out(&items, 80, 24),
             &items,
             0,
             0,
@@ -2110,6 +2137,21 @@ mod tests {
             None,
             None,
             5,
+            80,
+        )
+        .unwrap();
+        draw_bar(
+            &mut buf,
+            &tab_bar_layout(&session, 80, 24),
+            &[],
+            0,
+            0,
+            ChipColor::fill(Color::Cyan),
+            ChipColor::fill(Color::Magenta),
+            ChipStyle::default(),
+            None,
+            None,
+            6,
             80,
         )
         .unwrap();
@@ -2150,8 +2192,7 @@ mod tests {
             running(0, "work", Some(AgentActivity::Working), false),
             running(2, "build", Some(AgentActivity::Working), false),
         ];
-        let session = view("work", &["sh"]);
-        let layout = laid_out(&items, &session, 80, 24);
+        let layout = laid_out(&items, 80, 24);
         let draw = |chip: ChipStyle| {
             let mut buf = Vec::new();
             draw_bar(
@@ -2200,8 +2241,7 @@ mod tests {
             running(2, "notes", Some(AgentActivity::Idle), true),
             running(4, "shell", Some(AgentActivity::Idle), false),
         ];
-        let session = view("work", &["sh"]);
-        let layout = laid_out(&items, &session, 80, 24);
+        let layout = laid_out(&items, 80, 24);
         let mut buf = Vec::new();
         draw_bar(
             &mut buf,
@@ -2238,8 +2278,7 @@ mod tests {
         // The session you are in keeps the active chip even if its flag
         // is still set, so the bar still shows where you are.
         let open = vec![running(2, "notes", Some(AgentActivity::Idle), true)];
-        let session = view("notes", &["sh"]);
-        let layout = laid_out(&open, &session, 40, 24);
+        let layout = laid_out(&open, 40, 24);
         let mut buf = Vec::new();
         draw_bar(
             &mut buf,
@@ -2450,8 +2489,7 @@ mod tests {
             running(0, "work", Some(AgentActivity::Working), false),
             running(1, "notes", Some(AgentActivity::Working), false),
         ];
-        let session = view("work", &["sh"]);
-        let layout = laid_out(&items, &session, 20, 24);
+        let layout = laid_out(&items, 20, 24);
         let mut buf = Vec::new();
         draw_bar(
             &mut buf,
@@ -2512,8 +2550,7 @@ mod tests {
             running(0, "work", Some(AgentActivity::Idle), false),
             running(1, "notes", Some(AgentActivity::Idle), true),
         ];
-        let session = view("work", &["sh"]);
-        let layout = laid_out(&items, &session, 40, 24);
+        let layout = laid_out(&items, 40, 24);
         let mut buf = Vec::new();
         draw_bar(
             &mut buf,

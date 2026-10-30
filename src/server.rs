@@ -430,7 +430,7 @@ pub fn run() -> Result<()> {
         // and anyone looking at a list whose agent marks just changed —
         // including a background tab, which does not otherwise repaint.
         // A running client also repaints when *any* session's mark
-        // changes: the status bar lists every one of them.
+        // changes: the session bar lists every one of them.
         for client in &mut clients {
             let output = client
                 .attached
@@ -523,8 +523,8 @@ pub fn run() -> Result<()> {
         }
 
         // Session chips, tab chips, and agent marks all change how many
-        // rows the status bar wraps to. Resize before the paint so this
-        // frame already shows the new pane height.
+        // rows the bars wrap to. Resize before the paint so this frame
+        // already shows the new pane height.
         for ci in 0..clients.len() {
             if clients[ci].closing || clients[ci].dead {
                 continue;
@@ -544,7 +544,7 @@ pub fn run() -> Result<()> {
         }
 
         // A working → idle rollup is a finished turn. Highlight that
-        // session on the status bar until a client is looking at it
+        // session on the session bar until a client is looking at it
         // (attached, and not inside an overlay).
         for session in &mut sessions {
             let activity = session.agent_activity();
@@ -610,6 +610,7 @@ pub fn run() -> Result<()> {
                         config.bar_foreground,
                         config.agent_bar_foreground,
                         config.bar_position,
+                        config.tab_bar_position,
                         config.agent_bar_position,
                         // A full frame wipes the screen before painting,
                         // so it has to be atomic even when a pointer-only
@@ -817,12 +818,12 @@ pub fn run() -> Result<()> {
 
 /// Pane area for the client attached to session `si`.
 ///
-/// The status bar's height depends on this client's width and on the
-/// session's tabs, so two clients can have different pane heights.
-/// The agent bar adds its own rows when agent sessions exist.
-/// A missing session (one being created) reserves a single status-bar
-/// row when that bar is shown; the following attach resizes to the
-/// real wrap. A hidden bar reserves nothing.
+/// Bar heights depend on this client's width and on the session's tabs,
+/// so two clients can have different pane heights. The agent bar adds
+/// its own rows when agent sessions exist. A missing session (one being
+/// created) reserves one row for each of the session and tab bars when
+/// that bar is shown; the following attach resizes to the real wrap. A
+/// hidden bar reserves nothing.
 fn pane_size(screen: (u16, u16), sessions: &[Session], si: usize, config: &Config) -> (u16, u16) {
     client_chrome(screen, sessions, si, config).content
 }
@@ -834,7 +835,15 @@ fn client_chrome(
     config: &Config,
 ) -> crate::render::Chrome {
     let Some(session) = sessions.get(si) else {
-        return chrome(screen, config.bar_position, 1, config.agent_bar_position, 0);
+        return chrome(
+            screen,
+            config.bar_position,
+            1,
+            config.tab_bar_position,
+            1,
+            config.agent_bar_position,
+            0,
+        );
     };
     let items = bar_sessions(&config.pins, sessions);
     let agent_items = agent_bar_sessions(sessions);
@@ -844,6 +853,7 @@ fn client_chrome(
         session,
         screen,
         config.bar_position,
+        config.tab_bar_position,
         config.agent_bar_position,
     )
     .0

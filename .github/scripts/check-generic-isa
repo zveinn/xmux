@@ -1,0 +1,68 @@
+#!/bin/bash
+# Fail if a release binary requires instruction-set extensions that a generic
+# build of this architecture must not. Run this on the binary that is about
+# to be published.
+#
+# amd64 rejects AVX-512 (zmm registers and opmask registers). SSE2 and the
+# AVX2 paths that crates such as memchr select at runtime are fine; AVX-512
+# is not part of a portable amd64 baseline, and it is what SIGILL'd on
+# Meteor Lake.
+#
+# arm64 rejects SVE and SME register files. NEON is mandatory in AArch64 and
+# is not checked.
+
+set -euo pipefail
+
+arch=${1:?usage: check-generic-isa <amd64|arm64> <binary>}
+bin=${2:?usage: check-generic-isa <amd64|arm64> <binary>}
+
+if [[ ! -f "$bin" ]]; then
+  echo "check-generic-isa: no such file: $bin" >&2
+  exit 1
+fi
+
+# A pipe into grep -m would SIGPIPE the producer once grep has its 20 lines,
+# and pipefail would report that instead of a match. Search a file instead.
+dis=$(mktemp)
+trap 'rm -f "$dis"' EXIT
+objdump -d --no-show-raw-insn "$bin" > "$dis"
+
+# Exit 2 is a grep error and must fail the check. Treating it as "no match"
+# would let a bad pattern pass.
+reject() {
+  local pattern=$1
+  local message=$2
+  local matches status=0
+  matches=$(grep -E -m 20 -n -- "$pattern" "$dis") || status=$?
+  if [[ "$status" -eq 0 ]]; then
+    printf '%s\n' "$matches" >&2
+    echo "error: $bin $message" >&2
+    exit 1
+  fi
+  if [[ "$status" -gt 1 ]]; then
+    echo "check-generic-isa: grep failed (status $status) for pattern $pattern" >&2
+    exit "$status"
+  fi
+}
+
+case "$arch" in
+  amd64)
+    # AT&T objdump: AVX-512 uses %zmm and the opmask registers %k0-%k7.
+    # %ymm is intentionally allowed; memchr and similar crates ship AVX2
+    # paths and only take them after a runtime CPU check.
+    reject '%zmm[0-9]|%k[0-7]([^0-9A-Za-z_]|$)' \
+      "contains AVX-512 instructions; the amd64 release build is not generic"
+    ;;
+  arm64)
+    # Operands only, so addresses and labels do not count. SVE uses z0-z31,
+    # SME uses za, predicates are p0-p15. NEON uses v registers and is allowed.
+    reject '[[:space:]]z[0-9]{1,2}([.,]|$)|[[:space:]]za([.,]|$)|[[:space:]]p[0-9]{1,2}([.,]|$)' \
+      "contains SVE or SME instructions; the arm64 release build is not generic"
+    ;;
+  *)
+    echo "check-generic-isa: unknown arch '$arch' (expected amd64 or arm64)" >&2
+    exit 1
+    ;;
+esac
+
+echo "generic ISA check passed ($arch)"

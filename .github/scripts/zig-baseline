@@ -1,0 +1,41 @@
+#!/bin/bash
+# Wrapper placed ahead of the real zig on PATH by the release workflow.
+#
+# libghostty-vt-sys only passes -Dtarget when TARGET != HOST. On a native
+# runner, Zig therefore compiles Ghostty for the host CPU and the release
+# binary inherits that machine's extensions (AVX-512 on the amd64
+# ubuntu-latest image, SVE and friends on a newer arm runner). These builds
+# are shipped to other machines, so the CPU has to be the architecture
+# baseline instead.
+#
+# XMUX_ZIG_REAL is the setup-zig binary. XMUX_ZIG_TARGET is the triple for
+# this job (x86_64-linux-gnu or aarch64-linux-gnu). An explicit triple with
+# -Dcpu=baseline is Zig's generic model: SSE2 on amd64, armv8.0-a on arm64.
+
+set -euo pipefail
+
+if [[ -z "${XMUX_ZIG_REAL:-}" || -z "${XMUX_ZIG_TARGET:-}" ]]; then
+  echo "zig-baseline: XMUX_ZIG_REAL and XMUX_ZIG_TARGET must be set" >&2
+  exit 1
+fi
+
+if [[ "${1:-}" == "build" ]]; then
+  has_target=0
+  has_cpu=0
+  for arg in "$@"; do
+    case "$arg" in
+      -Dtarget | -Dtarget=*) has_target=1 ;;
+      -Dcpu | -Dcpu=*) has_cpu=1 ;;
+    esac
+  done
+  extra=()
+  if [[ "$has_target" -eq 0 ]]; then
+    extra+=("-Dtarget=${XMUX_ZIG_TARGET}")
+  fi
+  if [[ "$has_cpu" -eq 0 ]]; then
+    extra+=("-Dcpu=baseline")
+  fi
+  exec "$XMUX_ZIG_REAL" "$@" "${extra[@]}"
+fi
+
+exec "$XMUX_ZIG_REAL" "$@"

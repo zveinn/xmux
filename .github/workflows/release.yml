@@ -52,14 +52,31 @@ jobs:
       fail-fast: false
       matrix:
         # Native runners on both architectures: libghostty-vt-sys compiles
-        # Ghostty with zig for the host, so cross-compiling is more trouble
-        # than a second runner.
+        # Ghostty with zig, and cross-compiling that is more trouble than a
+        # second runner. The runners are pinned (not ubuntu-latest) and the
+        # Zig/Rust CPU is the architecture baseline, not the host CPU. A
+        # native build on the 26.04 runner shipped AVX-512 and SIGILL'd on
+        # machines that don't have it.
         arch:
-          - { name: amd64, runner: ubuntu-latest }
-          - { name: arm64, runner: ubuntu-24.04-arm }
+          - {
+              name: amd64,
+              runner: ubuntu-24.04,
+              zig_target: x86_64-linux-gnu,
+              rust_cpu: x86-64,
+            }
+          - {
+              name: arm64,
+              runner: ubuntu-24.04-arm,
+              zig_target: aarch64-linux-gnu,
+              rust_cpu: generic,
+            }
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
+      # Rust code and the prebuilt std stay on the portable baseline.
+      # x86-64 is SSE2. generic on arm64 is armv8.0-a plus NEON.
+      RUSTFLAGS: -C target-cpu=${{ matrix.arch.rust_cpu }}
+      XMUX_ZIG_TARGET: ${{ matrix.arch.zig_target }}
     steps:
       - uses: actions/checkout@v4
 
@@ -67,7 +84,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.arch.name }}
+          # Bump the suffix when the target CPU changes. The previous cache
+          # holds Ghostty objects built for the runner's own CPU.
+          key: ${{ matrix.arch.name }}-baseline
 
       # libghostty-vt-sys builds libghostty-vt from Ghostty source at build
       # time, and Ghostty requires this EXACT zig version (newer ones are
@@ -77,10 +96,29 @@ jobs:
         with:
           version: 0.15.2
 
+      # libghostty-vt-sys lets Zig pick the host CPU for a native build.
+      # Put a wrapper first on PATH that adds -Dtarget and -Dcpu=baseline
+      # to every `zig build`. See .github/scripts/zig-baseline.
+      - name: Force a baseline Zig CPU
+        run: |
+          set -euo pipefail
+          real=$(command -v zig)
+          install -d "$RUNNER_TEMP/bin"
+          install -m755 .github/scripts/zig-baseline "$RUNNER_TEMP/bin/zig"
+          echo "XMUX_ZIG_REAL=$real" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
       - name: Build
         run: |
+          set -euo pipefail
+          # The wrapper has to be the zig that cargo's build script finds.
+          case "$(command -v zig)" in
+            "$RUNNER_TEMP/bin/zig") ;;
+            *) echo "zig on PATH is not the baseline wrapper: $(command -v zig)" >&2; exit 1 ;;
+          esac
           cargo build --release --locked
           strip target/release/xmux
+          .github/scripts/check-generic-isa "${{ matrix.arch.name }}" target/release/xmux
 
       - name: Package
         env:

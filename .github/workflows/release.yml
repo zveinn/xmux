@@ -117,8 +117,10 @@ jobs:
             *) echo "zig on PATH is not the baseline wrapper: $(command -v zig)" >&2; exit 1 ;;
           esac
           cargo build --release --locked
-          strip target/release/xmux
+          # Before strip: the arm64 scan attributes SVE to a symbol, and
+          # Highway's dispatched copies are identifiable only by name.
           .github/scripts/check-generic-isa "${{ matrix.arch.name }}" target/release/xmux
+          strip target/release/xmux
 
       - name: Package
         env:

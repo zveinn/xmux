@@ -35,6 +35,9 @@ if [[ "${1:-}" == "build" ]]; then
   if [[ "$has_cpu" -eq 0 ]]; then
     extra+=("-Dcpu=baseline")
   fi
+  if [[ "${#extra[@]}" -gt 0 ]]; then
+    echo "zig-baseline: $* ${extra[*]}" >&2
+  fi
   exec "$XMUX_ZIG_REAL" "$@" "${extra[@]}"
 fi
 

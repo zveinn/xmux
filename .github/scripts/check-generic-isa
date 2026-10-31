@@ -8,8 +8,12 @@
 # is not part of a portable amd64 baseline, and it is what SIGILL'd on
 # Meteor Lake.
 #
-# arm64 rejects SVE and SME register files. NEON is mandatory in AArch64 and
-# is not checked.
+# arm64 rejects SVE and SME that the compiler emitted for the host CPU.
+# NEON is mandatory in AArch64 and is not checked. SVE inside a
+# runtime-dispatched copy (Highway's N_SVE namespaces, simdutf's sve
+# implementations) is allowed: those functions run only after a CPU check,
+# the same way memchr's AVX2 paths do on amd64. The binary must still have
+# its symbol table; strip it after this check.
 
 set -euo pipefail
 
@@ -56,8 +60,41 @@ case "$arch" in
   arm64)
     # Operands only, so addresses and labels do not count. SVE uses z0-z31,
     # SME uses za, predicates are p0-p15. NEON uses v registers and is allowed.
-    reject '[[:space:]]z[0-9]{1,2}([.,]|$)|[[:space:]]za([.,]|$)|[[:space:]]p[0-9]{1,2}([.,]|$)' \
-      "contains SVE or SME instructions; the arm64 release build is not generic"
+    #
+    # A symbol is a dispatched copy when its name says so (N_SVE, simdutf::sve,
+    # and the same for SME). Anything else is code the baseline compile was
+    # not allowed to emit.
+    status=0
+    awk '
+      BEGIN { sym = "<no symbol>" }
+      /^[[:xdigit:]]+ <[^>]+>:$/ {
+        sym = $2
+        gsub(/[<>:]/, "", sym)
+        next
+      }
+      /[[:space:]]z[0-9]{1,2}([.,]|$)|[[:space:]]za([.,]|$)|[[:space:]]p[0-9]{1,2}([.,]|$)/ {
+        if (sym ~ /[Ss][Vv][Ee]|[Ss][Mm][Ee]/) {
+          allowed++
+          next
+        }
+        bad++
+        if (bad <= 20) {
+          printf "%s\n%s\n", sym, $0 > "/dev/stderr"
+        }
+      }
+      END {
+        if (bad > 0) exit 1
+        printf "arm64: %d SVE/SME instructions in runtime-dispatched functions\n", allowed + 0
+      }
+    ' "$dis" || status=$?
+    if [[ "$status" -eq 1 ]]; then
+      echo "error: $bin contains SVE or SME instructions outside runtime-dispatched SIMD copies; the arm64 release build is not generic" >&2
+      exit 1
+    fi
+    if [[ "$status" -ne 0 ]]; then
+      echo "check-generic-isa: scan failed (status $status)" >&2
+      exit "$status"
+    fi
     ;;
   *)
     echo "check-generic-isa: unknown arch '$arch' (expected amd64 or arm64)" >&2
